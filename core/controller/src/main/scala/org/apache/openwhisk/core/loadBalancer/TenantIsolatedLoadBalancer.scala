@@ -1,8 +1,7 @@
 package org.apache.openwhisk.core.loadBalancer
 
 import akka.actor.{ActorRef, ActorSystem, Props}
-import akka.http.scaladsl.model.headers.RawHeader
-import akka.http.scaladsl.model.{HttpHeader, HttpResponse}
+import akka.http.scaladsl.model.HttpHeader
 import akka.stream.ActorMaterializer
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
@@ -10,8 +9,7 @@ import org.apache.openwhisk.core.WhiskConfig.wskApiHost
 import org.apache.openwhisk.core.connector.{ActivationMessage, MessagingProvider}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.spi.SpiLoader
-import spray.json.DefaultJsonProtocol._
-import spray.json.{JsValue, _}
+import spray.json._
 
 import java.time.Instant
 import scala.collection.immutable.Seq
@@ -21,11 +19,11 @@ import scala.util.{Failure, Success}
 class TenantIsolatedLoadBalancer(config: WhiskConfig,
                                  feedFactory: FeedFactory,
                                  controllerInstance: ControllerInstanceId,
-                                 implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(
-  implicit override val actorSystem: ActorSystem,
-  logging: Logging,
-  materializer: ActorMaterializer)
-    extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
+                                 implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])
+                                (implicit override val actorSystem: ActorSystem,
+                                 logging: Logging,
+                                 materializer: ActorMaterializer)
+  extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
   override protected val invokerPool: ActorRef = actorSystem.actorOf(Props.empty)
 
@@ -71,8 +69,6 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     val namespace: String = action.namespace.root.asString
     val pkg: String = if (action.namespace.defaultPackage) "default" else action.namespace.last.asString
     val act: String = action.name.asString
-    val headers: Seq[HttpHeader] = extractHeaders(msg.content)
-    val body: JsObject = extractBody(msg)
 
     /**
      * @TODO import Forwarder from multitenant allocator
@@ -81,11 +77,9 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
-      val httpResponse: Future[HttpResponse] = forwarder.forward(namespace, pkg, act, body, headers)
+      val httpResponse: Future[JsObject] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
       httpResponse.onComplete {
-        case Success(res) => {
-          // @TODO check the status of HttpResponse future and set response object accordingly
-          val result: JsObject = res.entity.toJson.asJsObject
+        case Success(result: JsObject) => {
           activationResponse = ActivationResponse.success(Some(result))
         }
         case Failure(exception) =>
@@ -103,45 +97,6 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
         response = activationResponse)
     }
     whiskActivation
-  }
-
-  /**
-   * Extracts body from the activation message regardless of the action type and converts it to Json object.
-   *
-   * @param msg: ActivationMessage
-   * @return JsObject
-   */
-  private def extractBody(msg: ActivationMessage): JsObject = {
-    val body: JsObject =
-      if (msg.content.get.fields.contains("__ow_body")) msg.content.get.fields("__ow_body").asJsObject
-      else msg.content.get.fields.filterKeys(elem => !elem.contains("__ow_")).toJson.asJsObject
-    body
-  }
-
-  /**
-   * Extracts headers from activation message and converts them to Akka HTTP headers
-   *
-   * @param content: Option[JsObject]
-   * @return Seq[HttpHeader]
-   */
-  private def extractHeaders(content: Option[JsObject]): Seq[HttpHeader] = {
-
-    /**
-     * @TODO there is should be a way how to get headers in more simple way
-     */
-    val headers: Seq[HttpHeader] = {
-      if (content.get.fields.contains("__ow_headers"))
-        content.get
-          .fields("__ow_headers")
-          .asJsObject
-          .fields
-          .map {
-            case (key: String, value: JsValue) => RawHeader(key, value.toString())
-          }
-          .toIndexedSeq
-      else Seq.empty[HttpHeader]
-      headers
-    }
   }
 }
 
