@@ -48,9 +48,9 @@ subprojects {
         // List generated via
         // ./gradlew :test:dependencies | grep -o 'akka-.*_' | cut -c 6- | rev | cut -c 2- | rev | sort -u
         def cons = project.getDependencies().getConstraints()
-        def akka = ['akka-actor', 'akka-cluster', 'akka-cluster-metrics', 'akka-cluster-tools', 'akka-coordination',
-                    'akka-discovery', 'akka-distributed-data', 'akka-protobuf', 'akka-remote', 'akka-slf4j',
-                    'akka-stream', 'akka-stream-testkit', 'akka-testkit']
+        def akka = ['akka-actor-typed', 'akka-cluster-typed', 'akka-stream-typed',
+                    'akka-cluster-metrics', 'akka-coordination', 'akka-protobuf', 'akka-remote', 'akka-slf4j',
+                    'akka-stream-testkit', 'akka-testkit-typed']
         def akkaHttp = ['akka-http', 'akka-http-core', 'akka-http-spray-json', 'akka-http-testkit', 'akka-http-xml',
                         'akka-parsing']
 
