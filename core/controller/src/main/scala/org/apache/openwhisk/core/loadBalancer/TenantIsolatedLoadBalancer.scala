@@ -1,8 +1,7 @@
 package org.apache.openwhisk.core.loadBalancer
 
-import akka.actor.{ActorRef, ActorSystem, Props}
+import akka.actor.{ActorSystem, Props}
 import akka.http.scaladsl.model.HttpHeader
-import akka.stream.ActorMaterializer
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.WhiskConfig.wskApiHost
@@ -10,8 +9,15 @@ import org.apache.openwhisk.core.connector.{ActivationMessage, MessagingProvider
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.spi.SpiLoader
 import spray.json._
-
 import java.time.Instant
+
+import akka.actor.typed.scaladsl.Behaviors.supervise
+import akka.actor.typed.{ActorRef, SupervisorStrategy}
+import akka.{ actor => classic }
+import org.apache.openwhisk.core.loadBalancer.allocator.{Allocation, AllocationCommand, Forwarder, KubernetesBackends, Settings, TenantAllocator, TenantRouter}
+import akka.actor.typed.scaladsl.adapter._
+import akka.cluster.typed.{ClusterSingleton, SingletonActor}
+
 import scala.collection.immutable.Seq
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
@@ -21,11 +27,24 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
                                  controllerInstance: ControllerInstanceId,
                                  implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])
                                 (implicit override val actorSystem: ActorSystem,
-                                 logging: Logging,
-                                 materializer: ActorMaterializer)
+                                 logging: Logging)
   extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
-  override protected val invokerPool: ActorRef = actorSystem.actorOf(Props.empty)
+  override protected val invokerPool: classic.ActorRef = actorSystem.actorOf(Props.empty)
+
+  private val typedSystem = actorSystem.toTyped
+  private val singletonManager = ClusterSingleton(typedSystem)
+  protected val kubernetesBackends = new KubernetesBackends(typedSystem)
+  protected val tenantAllocator: ActorRef[AllocationCommand] = singletonManager.init(
+    SingletonActor(
+      supervise(TenantAllocator(kubernetesBackends))
+        .onFailure[Exception](SupervisorStrategy.resume),
+      "Allocator"))
+
+  protected val tenantRouter: ActorRef[Allocation] = actorSystem.spawn(
+    supervise(TenantRouter(tenantAllocator, kubernetesBackends))
+      .onFailure[Exception](SupervisorStrategy.resume),
+    "Router")
 
   /**
    * No action
@@ -73,7 +92,7 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     /**
      * @TODO import Forwarder from multitenant allocator
      */
-    val forwarder: Forwarder = new Forwarder(Settings(context.system), tenantRouter)
+    val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
     val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
@@ -105,7 +124,6 @@ object TenantIsolatedLoadBalancer extends LoadBalancerProvider {
 
   override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
     implicit actorSystem: ActorSystem,
-    logging: Logging,
-    materializer: ActorMaterializer): LoadBalancer =
+    logging: Logging): LoadBalancer =
     new TenantIsolatedLoadBalancer(whiskConfig, createFeedFactory(whiskConfig, instance), instance)
 }

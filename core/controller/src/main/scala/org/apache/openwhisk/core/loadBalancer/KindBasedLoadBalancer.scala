@@ -1,7 +1,6 @@
 package org.apache.openwhisk.core.loadBalancer
 
 import akka.actor.{ActorRef, ActorSystem, Props}
-import akka.stream.ActorMaterializer
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.WhiskConfig._
@@ -17,8 +16,7 @@ class KindBasedLoadBalancer(config: WhiskConfig,
                             controllerInstance: ControllerInstanceId,
                             implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(
   implicit actorSystem: ActorSystem,
-  logging: Logging,
-  materializer: ActorMaterializer)
+  logging: Logging)
     extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
   private val balancers = lbConfig.strategy.foldLeft(Map.empty[String, LoadBalancer]) {
@@ -67,8 +65,7 @@ object KindBasedLoadBalancer extends LoadBalancerProvider {
 
   override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
     implicit actorSystem: ActorSystem,
-    logging: Logging,
-    materializer: ActorMaterializer): LoadBalancer = {
+    logging: Logging): LoadBalancer = {
 
     new KindBasedLoadBalancer(whiskConfig, createFeedFactory(whiskConfig, instance), instance)
   }
