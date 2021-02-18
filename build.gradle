@@ -50,7 +50,7 @@ subprojects {
         def cons = project.getDependencies().getConstraints()
         def akka = ['akka-actor-typed', 'akka-cluster-typed', 'akka-stream-typed', 'akka-discovery',
                     'akka-cluster-metrics', 'akka-coordination', 'akka-protobuf', 'akka-remote', 'akka-slf4j',
-                    'akka-stream-testkit', 'akka-testkit-typed']
+                    'akka-stream-testkit', 'akka-testkit-typed', 'akka-serialization-jackson']
         def akkaHttp = ['akka-http', 'akka-http-core', 'akka-http-spray-json', 'akka-http-testkit', 'akka-http-xml',
                         'akka-parsing']
 
