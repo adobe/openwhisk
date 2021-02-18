@@ -93,6 +93,7 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
      * @TODO import Forwarder from multitenant allocator
      */
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
+    implicit val system = actorSystem.toTyped
     val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
