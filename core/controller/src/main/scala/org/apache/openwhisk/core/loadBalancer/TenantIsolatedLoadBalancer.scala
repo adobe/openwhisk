@@ -1,23 +1,22 @@
 package org.apache.openwhisk.core.loadBalancer
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.typed.scaladsl.Behaviors.supervise
+import akka.actor.typed.scaladsl.adapter._
+import akka.actor.typed.{ActorRef, SupervisorStrategy}
+import akka.actor.{ActorSystem, Props, typed}
+import akka.cluster.typed.{ClusterSingleton, SingletonActor}
 import akka.http.scaladsl.model.HttpHeader
+import akka.{actor => classic}
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.WhiskConfig.wskApiHost
 import org.apache.openwhisk.core.connector.{ActivationMessage, MessagingProvider}
 import org.apache.openwhisk.core.entity._
+import org.apache.openwhisk.core.loadBalancer.allocator._
 import org.apache.openwhisk.spi.SpiLoader
 import spray.json._
+
 import java.time.Instant
-
-import akka.actor.typed.scaladsl.Behaviors.supervise
-import akka.actor.typed.{ActorRef, SupervisorStrategy}
-import akka.{ actor => classic }
-import org.apache.openwhisk.core.loadBalancer.allocator.{Allocation, AllocationCommand, Forwarder, KubernetesBackends, Settings, TenantAllocator, TenantRouter}
-import akka.actor.typed.scaladsl.adapter._
-import akka.cluster.typed.{ClusterSingleton, SingletonActor}
-
 import scala.collection.immutable.Seq
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
@@ -53,7 +52,6 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
 
   /**
    * Returns a message indicating the health of the containers and/or container pool in general.
-   * @TODO currently we don't monitor a health for Multi-tenant routing allocator
    *
    * @return a Future[IndexedSeq[InvokerHealth]] representing the health of the pools managed by the loadbalancer.
    */
@@ -89,19 +87,14 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     val pkg: String = if (action.namespace.defaultPackage) "default" else action.namespace.last.asString
     val act: String = action.name.asString
 
-    /**
-     * @TODO import Forwarder from multitenant allocator
-     */
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
-    implicit val system = actorSystem.toTyped
+    implicit val system: typed.ActorSystem[Nothing] = actorSystem.toTyped
     val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
       val httpResponse: Future[JsObject] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
       httpResponse.onComplete {
-        case Success(result: JsObject) => {
-          activationResponse = ActivationResponse.success(Some(result))
-        }
+        case Success(result: JsObject) => activationResponse = ActivationResponse.success(Some(result))
         case Failure(exception) =>
           activationResponse =
             ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))
