@@ -1,6 +1,6 @@
 package org.apache.openwhisk.core.loadBalancer
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.{ActorSystem, Props, typed}
 import akka.http.scaladsl.model.HttpHeader
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
@@ -13,7 +13,7 @@ import java.time.Instant
 
 import akka.actor.typed.scaladsl.Behaviors.supervise
 import akka.actor.typed.{ActorRef, SupervisorStrategy}
-import akka.{ actor => classic }
+import akka.{actor => classic}
 import org.apache.openwhisk.core.loadBalancer.allocator.{Allocation, AllocationCommand, Forwarder, KubernetesBackends, Settings, TenantAllocator, TenantRouter}
 import akka.actor.typed.scaladsl.adapter._
 import akka.cluster.typed.{ClusterSingleton, SingletonActor}
@@ -88,12 +88,8 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     val namespace: String = action.namespace.root.asString
     val pkg: String = if (action.namespace.defaultPackage) "default" else action.namespace.last.asString
     val act: String = action.name.asString
-
-    /**
-     * @TODO import Forwarder from multitenant allocator
-     */
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
-    implicit val system = actorSystem.toTyped
+    implicit val system: typed.ActorSystem[Nothing] = actorSystem.toTyped
     val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
