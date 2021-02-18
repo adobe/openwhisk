@@ -19,8 +19,8 @@ class KindBasedLoadBalancer(config: WhiskConfig,
   logging: Logging)
     extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
-  private val balancers = lbConfig.strategy.foldLeft(Map.empty[String, LoadBalancer]) {
-    case (result, (name, lbClass)) => result + (name -> getClass(lbClass))
+  private val balancers: Map[String, LoadBalancer] = lbConfig.strategy.foldLeft(Map.empty[String, LoadBalancer]) {
+    case (result, (name, lbClass)) => result + (name -> getClass[LoadBalancerProvider](lbClass).instance(config, controllerInstance))
   }
 
   def getClass[A](name: String): A = {
