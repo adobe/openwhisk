@@ -16,6 +16,12 @@ import org.apache.openwhisk.spi.SpiLoader
 import spray.json._
 
 import java.time.Instant
+import akka.actor.typed.scaladsl.Behaviors.supervise
+import akka.actor.typed.{ActorRef, SupervisorStrategy}
+import akka.{actor => classic}
+import akka.actor.typed.scaladsl.adapter._
+import akka.cluster.typed.{ClusterSingleton, SingletonActor}
+
 import scala.collection.immutable.Seq
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
@@ -71,8 +77,8 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
    */
   override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(
     implicit transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
-    val whiskActivation: WhiskActivation = invoke(action, msg)
-    Future.successful(Future(Right(whiskActivation)))
+    val whiskActivation: Future[Either[ActivationId, WhiskActivation]] = invoke(action, msg)
+    Future.successful(whiskActivation)
   }
 
   /**
@@ -82,34 +88,90 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
    * @param msg: Activation Message
    * @return WhiskActivation
    */
-  private def invoke(action: ExecutableWhiskActionMetaData, msg: ActivationMessage): WhiskActivation = {
+  private def invoke(action: ExecutableWhiskActionMetaData, msg: ActivationMessage): Future[Either[ActivationId, WhiskActivation]] = {
     val namespace: String = action.namespace.root.asString
     val pkg: String = if (action.namespace.defaultPackage) "default" else action.namespace.last.asString
     val act: String = action.name.asString
 
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
     implicit val system: typed.ActorSystem[Nothing] = actorSystem.toTyped
-    val whiskActivation: WhiskActivation = {
+    //val whiskActivation: WhiskActivation = {
       val start = Instant.now()
       var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
-      val httpResponse: Future[JsObject] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
-      httpResponse.onComplete {
-        case Success(result: JsObject) => activationResponse = ActivationResponse.success(Some(result))
-        case Failure(exception) =>
-          activationResponse =
-            ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))
+      val httpResponse: Future[Object] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
+//      httpResponse.onComplete {
+//        case Success(result: JsObject) =>
+//          WhiskActivation(
+//            action.namespace,
+//            action.name,
+//            msg.user.subject,
+//            msg.activationId,
+//            start,
+//            end = Instant.now(),
+//            response = ActivationResponse.success(Some(result)))
+////          activationResponse = ActivationResponse.success(Some(result))
+//        case Failure(exception) =>
+//          WhiskActivation(
+//            action.namespace,
+//            action.name,
+//            msg.user.subject,
+//            msg.activationId,
+//            start,
+//            end = Instant.now(),
+//            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage))))
+////          activationResponse =
+////            ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))
+//      }
+      val resultFuture: Future[Either[ActivationId, WhiskActivation]] = httpResponse transform {
+        case Success(result: JsObject) => {
+          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
+          action.namespace,
+          action.name,
+          msg.user.subject,
+          msg.activationId,
+          start,
+          end = Instant.now(),
+          response = ActivationResponse.success(Some(result))))
+          Success(wsk)
+        }
+        case Failure(exception: Exception) => {
+          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
+            action.namespace,
+            action.name,
+            msg.user.subject,
+            msg.activationId,
+            start,
+            end = Instant.now(),
+            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))))
+          Success(wsk)
+        }
+        case _ => {
+          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
+            action.namespace,
+            action.name,
+            msg.user.subject,
+            msg.activationId,
+            start,
+            end = Instant.now(),
+            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString("Unknown Error")))))
+          Success(wsk)
+        }
       }
+    resultFuture
 
-      WhiskActivation(
-        action.namespace,
-        action.name,
-        msg.user.subject,
-        msg.activationId,
-        start,
-        end = Instant.now(),
-        response = activationResponse)
-    }
-    whiskActivation
+//    }
+
+
+//      WhiskActivation(
+//        action.namespace,
+//        action.name,
+//        msg.user.subject,
+//        msg.activationId,
+//        start,
+//        end = Instant.now(),
+//        response = activationResponse)
+//    }
+//    whiskActivation
   }
 }
 
