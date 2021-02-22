@@ -1,7 +1,6 @@
 package org.apache.openwhisk.core.loadBalancer
 
-
-import akka.actor.{ActorSystem, Props, typed}
+import akka.actor.{typed, ActorSystem, Props}
 import akka.http.scaladsl.model.HttpHeader
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
@@ -14,7 +13,15 @@ import java.time.Instant
 import akka.actor.typed.scaladsl.Behaviors.supervise
 import akka.actor.typed.{ActorRef, SupervisorStrategy}
 import akka.{actor => classic}
-import org.apache.openwhisk.core.loadBalancer.allocator.{Allocation, AllocationCommand, Forwarder, KubernetesBackends, Settings, TenantAllocator, TenantRouter}
+import org.apache.openwhisk.core.loadBalancer.allocator.{
+  Allocation,
+  AllocationCommand,
+  Forwarder,
+  KubernetesBackends,
+  Settings,
+  TenantAllocator,
+  TenantRouter
+}
 import akka.actor.typed.scaladsl.adapter._
 import akka.cluster.typed.{ClusterSingleton, SingletonActor}
 
@@ -25,10 +32,10 @@ import scala.util.{Failure, Success}
 class TenantIsolatedLoadBalancer(config: WhiskConfig,
                                  feedFactory: FeedFactory,
                                  controllerInstance: ControllerInstanceId,
-                                 implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])
-                                (implicit override val actorSystem: ActorSystem,
-                                 logging: Logging)
-  extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
+                                 implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(
+  implicit override val actorSystem: ActorSystem,
+  logging: Logging)
+    extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
   override protected val invokerPool: classic.ActorRef = actorSystem.actorOf(Props.empty)
 
@@ -73,7 +80,7 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
   override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(
     implicit transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
     val whiskActivation: Future[Either[ActivationId, WhiskActivation]] = invoke(action, msg)
-    Future.successful(whiskActivation)
+    Future(whiskActivation)
   }
 
   /**
@@ -83,98 +90,67 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
    * @param msg: Activation Message
    * @return WhiskActivation
    */
-  private def invoke(action: ExecutableWhiskActionMetaData, msg: ActivationMessage): Future[Either[ActivationId, WhiskActivation]] = {
+  private def invoke(action: ExecutableWhiskActionMetaData,
+                     msg: ActivationMessage): Future[Either[ActivationId, WhiskActivation]] = {
     val namespace: String = action.namespace.root.asString
     val pkg: String = if (action.namespace.defaultPackage) "default" else action.namespace.last.asString
     val act: String = action.name.asString
 
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
     implicit val system: typed.ActorSystem[Nothing] = actorSystem.toTyped
-    //val whiskActivation: WhiskActivation = {
-      val start = Instant.now()
-      var activationResponse: ActivationResponse = ActivationResponse.success(Some(JsObject.empty))
-      val httpResponse: Future[Object] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
-//      httpResponse.onComplete {
-//        case Success(result: JsObject) =>
-//          WhiskActivation(
-//            action.namespace,
-//            action.name,
-//            msg.user.subject,
-//            msg.activationId,
-//            start,
-//            end = Instant.now(),
-//            response = ActivationResponse.success(Some(result)))
-////          activationResponse = ActivationResponse.success(Some(result))
-//        case Failure(exception) =>
-//          WhiskActivation(
-//            action.namespace,
-//            action.name,
-//            msg.user.subject,
-//            msg.activationId,
-//            start,
-//            end = Instant.now(),
-//            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage))))
-////          activationResponse =
-////            ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))
-//      }
-      val resultFuture: Future[Either[ActivationId, WhiskActivation]] = httpResponse transform {
-        case Success(result: JsObject) => {
-          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
-          action.namespace,
-          action.name,
-          msg.user.subject,
-          msg.activationId,
-          start,
-          end = Instant.now(),
-          response = ActivationResponse.success(Some(result))))
-          Success(wsk)
-        }
-        case Failure(exception: Exception) => {
-          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
-            action.namespace,
-            action.name,
-            msg.user.subject,
-            msg.activationId,
-            start,
-            end = Instant.now(),
-            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString(exception.getMessage)))))
-          Success(wsk)
-        }
-        case _ => {
-          val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](WhiskActivation(
-            action.namespace,
-            action.name,
-            msg.user.subject,
-            msg.activationId,
-            start,
-            end = Instant.now(),
-            response = ActivationResponse(ActivationResponse.ApplicationError, Some(new JsString("Unknown Error")))))
-          Success(wsk)
-        }
-      }
+    val start = Instant.now()
+    val httpResponse: Future[Object] = forwarder.forward(namespace, pkg, act, msg.content.get, Seq.empty[HttpHeader])
+    val resultFuture: Future[Either[ActivationId, WhiskActivation]] = httpResponse.transform {
+      case Success(result: JsObject) =>
+        val response: ActivationResponse = ActivationResponse.success(Some(result))
+        val wsk: scala.Either[ActivationId, WhiskActivation] = getWhiskActivation(action, msg, start, response)
+        Success(wsk)
+      case Failure(exception: Exception) =>
+        val response: ActivationResponse = ActivationResponse(
+          ActivationResponse.ApplicationError,
+          Some(new JsObject(Map("error" -> new JsString(exception.getMessage)))))
+        val wsk: Either[ActivationId, WhiskActivation] = getWhiskActivation(action, msg, start, response)
+        Success(wsk)
+      case _ =>
+        val response: ActivationResponse = ActivationResponse(
+          ActivationResponse.ApplicationError,
+          Some(new JsObject(Map("error" -> new JsString("Unknown error")))))
+        val wsk: Either[ActivationId, WhiskActivation] = getWhiskActivation(action, msg, start, response)
+        Success(wsk)
+    }
     resultFuture
+  }
 
-//    }
-
-
-//      WhiskActivation(
-//        action.namespace,
-//        action.name,
-//        msg.user.subject,
-//        msg.activationId,
-//        start,
-//        end = Instant.now(),
-//        response = activationResponse)
-//    }
-//    whiskActivation
+  /**
+   * Prepares Whisk Activation based on Activation Response.
+   *
+   * @param action: ExecutableWhiskActionMetaData
+   * @param msg: ActivationMessage
+   * @param start: Instant
+   * @param response: ActivationResponse
+   * @return Either[ActivationId, WhiskActivation]
+   */
+  private def getWhiskActivation(action: ExecutableWhiskActionMetaData,
+                                 msg: ActivationMessage,
+                                 start: Instant,
+                                 response: ActivationResponse): Either[ActivationId, WhiskActivation] = {
+    val wsk: Either[ActivationId, WhiskActivation] = Right[ActivationId, WhiskActivation](
+      WhiskActivation(
+        action.namespace,
+        action.name,
+        msg.user.subject,
+        msg.activationId,
+        start,
+        end = Instant.now(),
+        response = response))
+    wsk
   }
 }
 
 object TenantIsolatedLoadBalancer extends LoadBalancerProvider {
   override def requiredProperties: Map[String, String] = ExecManifest.requiredProperties ++ wskApiHost
 
-  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
-    implicit actorSystem: ActorSystem,
-    logging: Logging): LoadBalancer =
+  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(implicit actorSystem: ActorSystem,
+                                                                                  logging: Logging): LoadBalancer =
     new TenantIsolatedLoadBalancer(whiskConfig, createFeedFactory(whiskConfig, instance), instance)
 }
