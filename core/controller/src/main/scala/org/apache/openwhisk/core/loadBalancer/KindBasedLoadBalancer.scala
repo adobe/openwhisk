@@ -38,7 +38,6 @@ class KindBasedLoadBalancer(config: WhiskConfig,
   /** 1. Publish a message to the loadbalancer */
   override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(
     implicit transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
-    logging.info(this, "We are here")
     action.annotations.get("activationStrategy") match {
       case None =>
         balancers("default").publish(action, msg)

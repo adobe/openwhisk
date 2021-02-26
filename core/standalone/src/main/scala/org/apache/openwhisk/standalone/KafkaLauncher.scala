@@ -27,12 +27,13 @@ import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.WhiskConfig.kafkaHosts
 import org.apache.openwhisk.core.entity.ControllerInstanceId
-import org.apache.openwhisk.core.loadBalancer.{LeanBalancer, LoadBalancer, LoadBalancerProvider}
+import org.apache.openwhisk.core.loadBalancer.{LoadBalancer, LoadBalancerProvider}
 import org.apache.openwhisk.standalone.StandaloneDockerSupport.{checkOrAllocatePort, containerName, createRunCmd}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.reflect.io.Directory
 import scala.util.Try
+import org.apache.openwhisk.core.loadBalancer.KindBasedLoadBalancer
 
 class KafkaLauncher(
   docker: StandaloneDockerClient,
@@ -109,11 +110,11 @@ class KafkaLauncher(
 }
 
 object KafkaAwareLeanBalancer extends LoadBalancerProvider {
-  override def requiredProperties: Map[String, String] = LeanBalancer.requiredProperties ++ kafkaHosts
+  override def requiredProperties: Map[String, String] = KindBasedLoadBalancer.requiredProperties ++ kafkaHosts
 
-  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(implicit actorSystem: ActorSystem,
-                                                                                  logging: Logging): LoadBalancer =
-    LeanBalancer.instance(whiskConfig, instance)
+  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
+    implicit actorSystem: ActorSystem,
+    logging: Logging): LoadBalancer = KindBasedLoadBalancer.instance(whiskConfig, instance)
 }
 
 object KafkaLauncher {
