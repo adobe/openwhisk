@@ -94,6 +94,8 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     implicit val system: typed.ActorSystem[Nothing] = actorSystem.toTyped
     implicit val transid: TransactionId = msg.transid
 
+    val start = Instant.now()
+
     totalActivations.increment()
 
     val namespace: String = action.namespace.root.asString
@@ -102,7 +104,6 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
 
     val forwarder: Forwarder = new Forwarder(Settings(typedSystem), tenantRouter)
 
-    val start = Instant.now()
     MetricEmitter.emitCounterMetric(LoggingMarkers.LOADBALANCER_ACTIVATION_START)
     val startTransaction = transid.started(
       this,
@@ -114,12 +115,12 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
     val resultFuture: Future[Either[ActivationId, WhiskActivation]] = httpResponse.transform {
       case Success(result: JsObject) =>
         val response: ActivationResponse = ActivationResponse.success(Some(result))
-        val wsk: scala.Either[ActivationId, WhiskActivation] = getWhiskActivation(action, msg, start, response)
         transid.finished(
           this,
           startTransaction,
           s"successfully executed '${msg.activationId}' for $namespace/$pkg/$act",
           logLevel = InfoLevel)
+        val wsk: scala.Either[ActivationId, WhiskActivation] = getWhiskActivation(action, msg, start, response)
         Success(wsk)
       case Failure(exception: Exception) =>
         val response: ActivationResponse = ActivationResponse(
@@ -158,17 +159,20 @@ class TenantIsolatedLoadBalancer(config: WhiskConfig,
 
     val end: Instant = Instant.now()
     val activation: WhiskActivation = WhiskActivation(
-      action.namespace,
-      action.name,
-      msg.user.subject,
-      msg.activationId,
-      start,
+      namespace = action.namespace,
+      name = action.name,
+      subject = msg.user.subject,
+      activationId = msg.activationId,
+      start = start,
       end = end,
+      cause = msg.cause,
       response = response,
+      version = msg.action.version.getOrElse(SemVer()),
       annotations = {
         Parameters(WhiskActivation.pathAnnotation, JsString(msg.action.copy(version = None).asString)) ++
           Parameters(WhiskActivation.kindAnnotation, JsString(Exec.UNKNOWN)) ++ causedBy
-      }
+      },
+      duration = Some(end.toEpochMilli - start.toEpochMilli)
     )
     ack(
       transId,
