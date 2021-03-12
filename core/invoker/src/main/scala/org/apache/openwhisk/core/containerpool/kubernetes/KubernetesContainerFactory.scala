@@ -41,14 +41,14 @@ import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 
 class KubernetesContainerFactory(
-  label: String,
-  config: WhiskConfig,
-  containerArgsConfig: ContainerArgsConfig = loadConfigOrThrow[ContainerArgsConfig](ConfigKeys.containerArgs),
-  runtimesRegistryConfig: RuntimesRegistryConfig =
-    loadConfigOrThrow[RuntimesRegistryConfig](ConfigKeys.runtimesRegistry),
-  userImagesRegistryConfig: RuntimesRegistryConfig = loadConfigOrThrow[RuntimesRegistryConfig](
-    ConfigKeys.userImagesRegistry))(implicit actorSystem: ActorSystem, ec: ExecutionContext, logging: Logging)
-    extends ContainerFactory {
+                                  label: String,
+                                  config: WhiskConfig,
+                                  containerArgsConfig: ContainerArgsConfig = loadConfigOrThrow[ContainerArgsConfig](ConfigKeys.containerArgs),
+                                  runtimesRegistryConfig: RuntimesRegistryConfig =
+                                  loadConfigOrThrow[RuntimesRegistryConfig](ConfigKeys.runtimesRegistry),
+                                  userImagesRegistryConfig: RuntimesRegistryConfig = loadConfigOrThrow[RuntimesRegistryConfig](
+                                    ConfigKeys.userImagesRegistry))(implicit actorSystem: ActorSystem, ec: ExecutionContext, logging: Logging)
+  extends ContainerFactory {
 
   implicit val kubernetes = initializeKubeClient()
 
@@ -62,9 +62,9 @@ class KubernetesContainerFactory(
 
   override def cleanup() = {
     logging.info(this, "Cleaning up function runtimes")
-    val labels = Map("invoker" -> label, "release" -> KubernetesContainerFactoryProvider.release)
+    val labels = Map("invoker" -> label)
     val cleaning = kubernetes.rm(labels, true)(TransactionId.invokerNanny)
-    Await.ready(cleaning, KubernetesContainerFactoryProvider.runtimeDeleteTimeout)
+    Await.ready(cleaning, 30.seconds)
   }
 
   override def createContainer(tid: TransactionId,
@@ -83,15 +83,11 @@ class KubernetesContainerFactory(
       userProvidedImage,
       memory,
       environment = Map("__OW_API_HOST" -> config.wskApiHost) ++ containerArgsConfig.extraEnvVarMap,
-      labels = Map("invoker" -> label, "release" -> KubernetesContainerFactoryProvider.release))
+      labels = Map("invoker" -> label))
   }
 }
 
 object KubernetesContainerFactoryProvider extends ContainerFactoryProvider {
-
-  val release = loadConfigOrThrow[String]("whisk.helm.release")
-  val runtimeDeleteTimeout = loadConfigOrThrow[FiniteDuration]("whisk.runtime.delete.timeout")
-
   override def instance(actorSystem: ActorSystem,
                         logging: Logging,
                         config: WhiskConfig,
