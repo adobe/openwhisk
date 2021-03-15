@@ -17,28 +17,40 @@
 
 package org.apache.openwhisk.http
 
-import akka.actor.ActorSystem
+import akka.Done
+import akka.actor.{ActorSystem, CoordinatedShutdown}
 import akka.event.Logging
-import akka.http.scaladsl.{Http, ServerBuilder}
 import akka.http.scaladsl.model.{HttpRequest, _}
 import akka.http.scaladsl.server.RouteResult.Rejected
 import akka.http.scaladsl.server._
 import akka.http.scaladsl.server.directives._
-
+import akka.http.scaladsl.{Http, ServerBuilder}
+import akka.pattern.after
 import kamon.metric.MeasurementUnit
-import spray.json._
 import org.apache.openwhisk.common.Https.HttpsConfig
 import org.apache.openwhisk.common._
+import pureconfig.loadConfigOrThrow
+import pureconfig.generic.auto._
+import pureconfig._
+import spray.json._
 
 import scala.collection.immutable.Seq
-import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, Future}
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
+import scala.concurrent.{ExecutionContextExecutor, Future}
+import scala.util.{Failure, Success}
+
+case class BasicHttpServiceConfig(shutdownUnreadyDelay: FiniteDuration, shutdownTerminationLimit: FiniteDuration)
 
 /**
  * This trait extends the Akka Directives and Actor with logging and transaction counting
  * facilities common to all OpenWhisk REST services.
  */
 trait BasicHttpService extends Directives {
+
+  implicit val logging: Logging
+
+  //start with ready true
+  protected var readyState = true
 
   val OW_EXTRA_LOGGING_HEADER = "X-OW-EXTRA-LOGGING"
 
@@ -168,23 +180,42 @@ object BasicHttpService {
   /**
    * Starts an HTTP(S) route handler on given port and registers a shutdown hook.
    */
-  def startHttpService(route: Route, port: Int, config: Option[HttpsConfig] = None, interface: String = "0.0.0.0")(
+  def startHttpService(service: BasicHttpService, port: Int, config: Option[HttpsConfig] = None, interface: String = "0.0.0.0")(
     implicit
-    actorSystem: ActorSystem): Unit = {
+    actorSystem: ActorSystem, logging: Logging): Unit = {
     val httpsContext = config.map(Https.connectionContextServer(_))
     var httpBindingBuilder: ServerBuilder = Http().newServerAt(interface, port)
     if (httpsContext.isDefined) {
       httpBindingBuilder = httpBindingBuilder.enableHttps(httpsContext.get)
     }
-    val httpBinding = httpBindingBuilder.bindFlow(route)
-    addShutdownHook(httpBinding)
+    val httpBinding = httpBindingBuilder.bindFlow(service.route)
+    logging.info(this, "starting http service...")
+    addShutdownHook(service, httpBinding)
   }
 
-  def addShutdownHook(binding: Future[Http.ServerBinding])(implicit actorSystem: ActorSystem): Unit = {
-    implicit val executionContext = actorSystem.dispatcher
-    sys.addShutdownHook {
-      Await.result(binding.map(_.unbind()), 30.seconds)
-      Await.result(actorSystem.whenTerminated, 30.seconds)
+  def addShutdownHook(service: BasicHttpService, binding: Future[Http.ServerBinding], httpServiceConfig: BasicHttpServiceConfig =
+  loadConfigOrThrow[BasicHttpServiceConfig]("whisk.http"))(implicit actorSystem: ActorSystem, logging: Logging): Unit = {
+    implicit val executionContext: ExecutionContextExecutor = actorSystem.dispatcher
+    CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseBeforeServiceUnbind, "http_unready") { () =>
+      logging.info(this, "shutdown unready...")
+      //return 503 status at /ready endpoint for some time before actual termination begins
+      service.readyState = false
+      after(httpServiceConfig.shutdownUnreadyDelay, actorSystem.scheduler) {
+        logging.info(this, "shutdown unready complete...")
+        Future.successful(Done)
+      }
+    }
+    CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseServiceUnbind, "http_termination") { () =>
+      logging.info(this, "shutdown terminating...")
+      binding
+        .flatMap(_.terminate(hardDeadline = httpServiceConfig.shutdownTerminationLimit))
+        .andThen {
+          case Success(_) => logging.info(this, "shutdown termination complete...")
+          case Failure(t) => logging.info(this, s"shutdown termination failed... ${t}")
+        }
+        .map { _ =>
+          Done
+        }
     }
   }
 

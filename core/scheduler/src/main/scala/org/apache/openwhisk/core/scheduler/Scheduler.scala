@@ -37,7 +37,7 @@ import pureconfig.loadConfigOrThrow
 import spray.json.{DefaultJsonProtocol, _}
 
 import scala.concurrent.duration._
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 import pureconfig.generic.auto._
@@ -190,11 +190,11 @@ object Scheduler {
   }
 
   def main(args: Array[String]): Unit = {
-    implicit val ec = ExecutionContextFactory.makeCachedThreadPoolExecutionContext()
+    implicit val ec: ExecutionContext = ExecutionContextFactory.makeCachedThreadPoolExecutionContext()
     implicit val actorSystem: ActorSystem =
       ActorSystem(name = "scheduler-actor-system", defaultExecutionContext = Some(ec))
 
-    implicit val logger = new AkkaLogging(akka.event.Logging.getLogger(actorSystem, this))
+    implicit val logger: AkkaLogging = new AkkaLogging(akka.event.Logging.getLogger(actorSystem, this))
 
     // Prepare Kamon shutdown
     CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseActorSystemTerminate, "shutdownKamon") { () =>
@@ -210,7 +210,7 @@ object Scheduler {
     }
 
     // extract configuration data from the environment
-    implicit val config = new WhiskConfig(requiredProperties)
+    implicit val config: WhiskConfig = new WhiskConfig(requiredProperties)
     if (!config.isValid) {
       abort("Bad configuration, cannot start.")
     }
@@ -248,7 +248,7 @@ object Scheduler {
         val httpsConfig =
           if (Scheduler.protocol == "https") Some(loadConfigOrThrow[HttpsConfig]("whisk.controller.https")) else None
 
-        BasicHttpService.startHttpService(FPCSchedulerServer.instance(scheduler).route, port, httpsConfig)(actorSystem)
+        BasicHttpService.startHttpService(FPCSchedulerServer.instance(scheduler), port, httpsConfig)(actorSystem, logger)
 
       case Failure(t) =>
         abort(s"Invalid runtimes manifest: $t")

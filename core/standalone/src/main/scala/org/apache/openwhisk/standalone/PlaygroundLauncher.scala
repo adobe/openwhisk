@@ -18,7 +18,6 @@
 package org.apache.openwhisk.standalone
 
 import java.nio.charset.StandardCharsets.UTF_8
-
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.server.Route
@@ -27,7 +26,7 @@ import akka.stream.scaladsl.{Sink, Source}
 import ch.megard.akka.http.cors.scaladsl.CorsDirectives._
 import org.apache.commons.io.IOUtils
 import org.apache.commons.lang3.SystemUtils
-import org.apache.openwhisk.common.{Logging, TransactionId}
+import org.apache.openwhisk.common.{AkkaLogging, Logging, TransactionId}
 import org.apache.openwhisk.core.ExecManifestSupport
 import org.apache.openwhisk.http.BasicHttpService
 import pureconfig._
@@ -71,7 +70,7 @@ class PlaygroundLauncher(
   private val wsk = new Wsk(host, controllerPort, authKey)
 
   def run(): ServiceContainer = {
-    BasicHttpService.startHttpService(PlaygroundService.route, pgPort, None, interface)(actorSystem)
+    BasicHttpService.startHttpService(PlaygroundService, pgPort, None, interface)(actorSystem, logging)
     ServiceContainer(pgPort, pgUrl, "Playground")
   }
 
@@ -115,6 +114,7 @@ class PlaygroundLauncher(
   }
 
   object PlaygroundService extends BasicHttpService {
+    override implicit val logging: AkkaLogging = new AkkaLogging(actorSystem.log)
     override def routes(implicit transid: TransactionId): Route =
       path(PathEnd | Slash | pg) { redirect(s"/$pg/ui/index.html", StatusCodes.Found) } ~
         cors() {
