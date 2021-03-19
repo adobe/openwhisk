@@ -40,8 +40,29 @@ import scala.collection.JavaConverters._
 
 class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClientConfig) {
   private val template = config.podTemplate.map(_.value.getBytes(UTF_8))
-  private val actionContainerName = KubernetesRestLogSourceStage.actionContainerName
+  private val actionContainerName = "user-action"
   private val actionContainerPredicate: Predicate[ContainerBuilder] = (cb) => cb.getName == actionContainerName
+
+  // Building these here prevents sorting the map multiple times which could be expensive.
+  private val blackBoxDiskHints = for {
+    ephemeralConfig <- config.ephemeralStorage
+    bbConfig <- ephemeralConfig.blackbox
+    bbDisk <- bbConfig.sizeHints
+  } yield
+    bbDisk
+      .map((l) => (ByteSize.fromString(l._1), l._2))
+      .toSeq
+      .sortBy(_._1)
+
+  private val managedBoxDiskHints = for {
+    ephemeralConfig <- config.ephemeralStorage
+    bbConfig <- ephemeralConfig.managed
+    managedDisk <- bbConfig.sizeHints
+  } yield
+    managedDisk
+      .map((l) => (ByteSize.fromString(l._1), l._2))
+      .toSeq
+      .sortBy(_._1)
 
   def affinityEnabled: Boolean = config.userPodNodeAffinity.enabled
 
@@ -51,7 +72,8 @@ class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClie
     memory: ByteSize,
     environment: Map[String, String],
     labels: Map[String, String],
-    config: KubernetesClientConfig)(implicit transid: TransactionId): (Pod, Option[PodDisruptionBudget]) = {
+    config: KubernetesClientConfig,
+    userProvidedImage: Boolean)(implicit transid: TransactionId): (Pod, Option[PodDisruptionBudget]) = {
     val envVars = environment.map {
       case (key, value) => new EnvVarBuilder().withName(key).withValue(value).build()
     }.toSeq ++ config.fieldRefEnvironment
@@ -81,11 +103,10 @@ class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClie
     val specBuilder = pb1.editOrNewSpec().withRestartPolicy("Always")
 
     if (config.userPodNodeAffinity.enabled) {
-      val affinity = specBuilder
+      specBuilder
         .editOrNewAffinity()
         .editOrNewNodeAffinity()
         .editOrNewRequiredDuringSchedulingIgnoredDuringExecution()
-      affinity
         .addNewNodeSelectorTerm()
         .addNewMatchExpression()
         .withKey(config.userPodNodeAffinity.key)
@@ -97,27 +118,49 @@ class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClie
         .endNodeAffinity()
         .endAffinity()
     }
+    if (config.userPodInvokerAntiAffinity.enabled) {
+      specBuilder
+        .editOrNewAffinity()
+        .editOrNewPodAntiAffinity()
+        .addNewPreferredDuringSchedulingIgnoredDuringExecution()
+        .withWeight(100)
+        .withNewPodAffinityTerm()
+        .withNewLabelSelector()
+        .addToMatchLabels("invoker", labels("invoker"))
+        .endLabelSelector()
+        .withNewTopologyKey(config.userPodInvokerAntiAffinity.topologyKey)
+        .endPodAffinityTerm()
+        .endPreferredDuringSchedulingIgnoredDuringExecution()
+        .endPodAntiAffinity()
+        .endAffinity()
+        .buildAffinity()
+    }
 
     val containerBuilder = if (specBuilder.hasMatchingContainer(actionContainerPredicate)) {
       specBuilder.editMatchingContainer(actionContainerPredicate)
     } else specBuilder.addNewContainer()
 
     //if cpu scaling is enabled, calculate cpu from memory, 100m per 256Mi, min is 100m(.1cpu), max is 10000 (10cpu)
-    val cpu = config.cpuScaling
-      .map(cpuConfig => Map("cpu" -> new Quantity(calculateCpu(cpuConfig, memory) + "m")))
-      .getOrElse(Map.empty)
+    val (cpuRequests: Map[String, Quantity], cpuLimits: Map[String, Quantity]) = config.cpuScaling
+      .map { cpuConfig =>
+        val (cpuReq, cpuLimits) = calculateCpu(cpuConfig, memory)
+        val calculatedCpuRequests = Map("cpu" -> new Quantity(cpuReq + "m"))
+        val calculatedCpuLimits = cpuLimits
+          .map(limit => Map("cpu" -> new Quantity(limit + "m")))
+          .getOrElse(Map.empty)
+        (calculatedCpuRequests, calculatedCpuLimits)
+      }
+      .getOrElse(Map.empty -> Map.empty)
 
-    val diskLimit = config.ephemeralStorage
-      .map(diskConfig => Map("ephemeral-storage" -> new Quantity(diskConfig.limit.toMB + "Mi")))
-      .getOrElse(Map.empty)
+    val diskLimit = createDiskLimit(memory, userProvidedImage)
 
     //In container its assumed that env, port, resource limits are set explicitly
     //Here if any value exist in template then that would be overridden
     containerBuilder
       .withNewResources()
       //explicitly set requests and limits to same values
-      .withLimits((Map("memory" -> new Quantity(memory.toMB + "Mi")) ++ cpu ++ diskLimit).asJava)
-      .withRequests((Map("memory" -> new Quantity(memory.toMB + "Mi")) ++ cpu ++ diskLimit).asJava)
+      .withLimits((Map("memory" -> new Quantity(memory.toMB + "Mi")) ++ cpuLimits ++ diskLimit).asJava)
+      .withRequests((Map("memory" -> new Quantity(memory.toMB + "Mi")) ++ cpuRequests ++ diskLimit).asJava)
       .endResources()
       .withName(actionContainerName)
       .withImage(image)
@@ -126,6 +169,8 @@ class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClie
       .withContainerPort(8080)
       .withName("action")
       .endPort()
+      //assumes there is no termination message specifically generated, so inclue the last log line as the message
+      .withTerminationMessagePolicy("FallbackToLogsOnError")
 
     //If any existing context entry is present then "update" it else add new
     containerBuilder
@@ -156,15 +201,49 @@ class WhiskPodBuilder(client: NamespacedKubernetesClient, config: KubernetesClie
     (pod, pdb)
   }
 
-  def calculateCpu(c: KubernetesCpuScalingConfig, memory: ByteSize): Int = {
+  def calculateCpu(c: KubernetesCpuScalingConfig, memory: ByteSize): (Int, Option[Int]) = {
     val cpuPerMemorySegment = c.millicpus
     val cpuMin = c.millicpus
     val cpuMax = c.maxMillicpus
-    math.min(math.max((memory.toMB / c.memory.toMB) * cpuPerMemorySegment, cpuMin), cpuMax).toInt
+    val memorySegments = memory.toMB / c.memory.toMB
+    val cpu = math.min(math.max(memorySegments * cpuPerMemorySegment, cpuMin), cpuMax).toInt
+
+    val cpuLimit = c.cpuLimitScaling.map { limitConfig =>
+      (math.max(limitConfig.minScalingFactor, limitConfig.maxScalingFactor - math.max(memorySegments - 1, 0)) * cpu).toInt
+    }
+    cpu -> cpuLimit
   }
 
   private def loadPodSpec(bytes: Array[Byte]): Pod = {
     val resources = client.load(new ByteArrayInputStream(bytes))
     resources.get().get(0).asInstanceOf[Pod]
+  }
+
+  private def createDiskLimit(memoryRequested: ByteSize, userImage: Boolean): Map[String, Quantity] = {
+    config.ephemeralStorage
+      .flatMap(possibleConfig => {
+        val targetConfig = if (userImage) possibleConfig.blackbox else possibleConfig.managed
+        targetConfig
+          .map(diskConf => {
+            if (diskConf.sizeHints.isDefined) {
+              val hints = (if (userImage) blackBoxDiskHints else managedBoxDiskHints).get
+              var diskSize = hints(0)
+              hints.foreach(item => {
+                if (memoryRequested >= item._1) {
+                  diskSize = item
+                }
+              })
+              Map("ephemeral-storage" -> new Quantity(diskSize._2.toMB + "Mi"))
+            } else {
+              val scaleFactor: Double = diskConf.scaleFactor.getOrElse(0)
+              if ((scaleFactor > 0) && (scaleFactor * memoryRequested.toMB < diskConf.limit.toMB)) {
+                Map("ephemeral-storage" -> new Quantity(scaleFactor * memoryRequested.toMB + "Mi"))
+              } else {
+                Map("ephemeral-storage" -> new Quantity(diskConf.limit.toMB + "Mi"))
+              }
+            }
+          })
+      })
+      .getOrElse(Map.empty[String, Quantity])
   }
 }

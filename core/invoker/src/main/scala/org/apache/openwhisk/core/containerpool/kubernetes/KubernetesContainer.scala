@@ -18,9 +18,9 @@
 package org.apache.openwhisk.core.containerpool.kubernetes
 
 import akka.actor.ActorSystem
+
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
-
 import akka.stream.StreamLimitReachedException
 import akka.stream.scaladsl.Framing.FramingException
 import akka.stream.scaladsl.Source
@@ -34,11 +34,13 @@ import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.common.TransactionId
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.containerpool.docker.{CompleteAfterOccurrences, OccurrencesNotFoundException}
-import org.apache.openwhisk.core.entity.{ByteSize, WhiskAction}
+import org.apache.openwhisk.core.entity.{ByteSize, WhiskAction, WhiskActivation}
 import org.apache.openwhisk.core.entity.size._
+import org.apache.openwhisk.core.invoker.InvokerReactive
 import org.apache.openwhisk.http.Messages
 import spray.json.JsObject
 
+import java.net.SocketTimeoutException
 import scala.util.Failure
 
 object KubernetesContainer {
@@ -70,10 +72,18 @@ object KubernetesContainer {
     val podName = if (origName.endsWith("-")) origName.reverse.dropWhile(_ == '-').reverse else origName
 
     for {
-      container <- kubernetes.run(podName, image, memory, environment, labels).recoverWith {
+      container <- kubernetes.run(podName, image, memory, environment, labels, userProvidedImage).recoverWith {
         case e: KubernetesPodApiException =>
           //apiserver call failed - this will expose a different error to users
+          // Signal invoker to advertise unhealthy in case SocketTimeoutExceptions start occurring
+          if (e.getCause.isInstanceOf[SocketTimeoutException]) {
+            InvokerReactive.kubernetesSocketTimeout = true
+            log.error(this, s"Signal to invoker: SocketTimeoutException has occurred")
+          }
           cleanupFailedPod(e, podName, WhiskContainerStartupError(Messages.resourceProvisionError))
+        case e: BlackboxStartupError =>
+          //for blackbox startup, keep the error type but reset the message from "timed out" to "cound not run with image".
+          cleanupFailedPod(e, podName, BlackboxStartupError(s"Failed to run container with image '${image}'."))
         case e: Throwable =>
           cleanupFailedPod(e, podName, WhiskContainerStartupError(s"Failed to run container with image '${image}'."))
       }
@@ -124,6 +134,8 @@ class KubernetesContainer(protected[core] val id: ContainerId,
 
   protected val waitForLogs: FiniteDuration = 2.seconds
 
+  override val hostNode = Some(workerIP)
+
   override def suspend()(implicit transid: TransactionId): Future[Unit] = {
     super.suspend().flatMap(_ => kubernetes.suspend(this))
   }
@@ -131,10 +143,21 @@ class KubernetesContainer(protected[core] val id: ContainerId,
   override def resume()(implicit transid: TransactionId): Future[Unit] =
     kubernetes.resume(this).flatMap(_ => super.resume())
 
-  override def destroy()(implicit transid: TransactionId): Future[Unit] = {
+  override def destroy(checkErrors: Boolean = false)(implicit transid: TransactionId,
+                                                     activation: Option[WhiskActivation]): Future[Unit] = {
     super.destroy()
     portForward.foreach(_.close())
-    kubernetes.rm(this)
+    val logErrors = if (checkErrors) {
+      //get the pod container status to log for easier analysis
+      //make sure this does not prevent the rm() call to delete the pod
+      kubernetes.logPodStatus(this).recover {
+        case t: Throwable =>
+          logging.error(this, s"failed to log pod status ${t}")
+      }
+    } else {
+      Future.successful({})
+    }
+    logErrors.flatMap(_ => kubernetes.rm(this))
   }
 
   override def initialize(initializer: JsObject,

@@ -203,6 +203,7 @@ object WhiskConfig {
 object ConfigKeys {
   val cluster = "whisk.cluster"
   val loadbalancer = "whisk.loadbalancer"
+  val invokerHeatlh = s"${loadbalancer}.invoker-health"
   val buildInformation = "whisk.info"
 
   val couchdb = "whisk.couchdb"
@@ -286,4 +287,7 @@ object ConfigKeys {
   val parameterStorage = "whisk.parameter-storage"
 
   val azBlob = "whisk.azure-blob"
+
+  val invokerActionDrainDuration = "whisk.invoker.drain-duration"
+  val messageFeedEmptyDuration = "whisk.invoker.message-empty-duration"
 }

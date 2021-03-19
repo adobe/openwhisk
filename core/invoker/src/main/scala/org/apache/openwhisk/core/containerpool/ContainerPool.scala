@@ -29,11 +29,19 @@ import scala.collection.immutable
 import scala.concurrent.duration._
 import scala.util.{Random, Try}
 
+sealed trait WorkerState
+case object Busy extends WorkerState
+case object Free extends WorkerState
+
 case class ColdStartKey(kind: String, memory: ByteSize)
+
+case class WorkerData(data: ContainerData, state: WorkerState)
 
 case object EmitMetrics
 
 case object AdjustPrewarmedContainer
+case object Close
+case object Closed
 
 /**
  * A pool managing containers to run actions on.
@@ -91,7 +99,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
         .nextInt(v.toSeconds.toInt))
     .getOrElse(0)
     .seconds
-  context.system.scheduler.scheduleAtFixedRate(2.seconds, interval, self, AdjustPrewarmedContainer)
+  val adjustPrewarmFunction = context.system.scheduler.scheduleAtFixedRate(2.seconds, interval, self, AdjustPrewarmedContainer)
 
   def logContainerStart(r: Run, containerState: String, activeActivations: Int, container: Option[Container]): Unit = {
     val namespaceName = r.msg.user.namespace.name.asString
@@ -106,6 +114,8 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       s"containerStart containerState: $containerState container: $container activations: $activeActivations of max $maxConcurrent action: $actionName namespace: $namespaceName activationId: $activationId",
       akka.event.Logging.InfoLevel)
   }
+
+  private var closeRequester: Option[ActorRef] = None
 
   def receive: Receive = {
     // A job to run on a container
@@ -302,6 +312,57 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
 
     case AdjustPrewarmedContainer =>
       adjustPrewarmedContainer(false, true)
+    case Close =>
+      if (closeRequester.isEmpty) {
+        closeRequester = Some(sender())
+        logging.info(this, s"Asking activation feed to close")
+        feed ! MessageFeed.Close
+      }
+      val pending = pendingActivations()
+      logging.info(this, s"Got request to close the pool pendingInContainers: ${pending}")
+      // This is just to ensure that somehow we weren't ask to close right before we got hit with a bunch of actions.
+      // Really we want to wait till the feed is empty and also this is empty, but we don't want to close this after the feed
+      // is empty as we want to keep this processing messages as they come in to ensure the least number of lost activations.
+      processBufferOrFeed()
+
+    case MessageFeed.Closed =>
+      logging.info(this, s"Got closed message from the feed.")
+      adjustPrewarmFunction.cancel()
+      val pending = pendingActivations()
+      if (runBuffer.isEmpty && busyPool.isEmpty && pending == 0 && closeRequester.isDefined) {
+        logging.info(this, "Zero inflight actions.")
+        closeRequester.get ! Closed
+        //TODO: instead of stopping the actor, just stop the scheduled tasks?
+        context.stop(self)
+      } else {
+        logging.info(this, s"Got request to close the pool pendingInContainers: ${pending}")
+        processBufferOrFeed()
+      }
+
+  }
+
+  def pendingActivations(): Int = {
+    val actionsInFree = freePool
+      .map((item) => {
+        item._2.activeActivationCount
+      })
+      .sum
+    val actionsInBusy =
+      busyPool
+        .map((item) => {
+          item._2.activeActivationCount
+        })
+        .sum
+    val actionsInPrewarm =
+      prewarmedPool
+        .map((item) => {
+          item._2.activeActivationCount
+        })
+        .sum
+    logging.debug(this, s"Inflight activations in freepool ${actionsInFree}")
+    logging.debug(this, s"Inflight activations in busyPool ${actionsInBusy}")
+    logging.debug(this, s"Inflight activations in prewarm ${actionsInPrewarm}")
+    List(actionsInFree, actionsInBusy, actionsInPrewarm).sum
   }
 
   /** Resend next item in the buffer, or trigger next item in the feed, if no items in the buffer. */

@@ -50,13 +50,6 @@ class KindBasedLoadBalancer(config: WhiskConfig,
       }
       case (Some(_))  =>  balancers("default").publish(action, msg)
     }
-
-//    if (action.annotations.get("activationStrategy").isDefined && balancers.contains(action.annotations.get("activationStrategy").get.toString.)
-//    {
-//      balancers().publish(action, msg)
-//    } else {
-//      balancers("default").publish(action, msg)
-//    }
   }
 }
 
@@ -69,7 +62,8 @@ object KindBasedLoadBalancer extends LoadBalancerProvider {
     new KindBasedLoadBalancer(whiskConfig, createFeedFactory(whiskConfig, instance), instance)
   }
 
-  def requiredProperties =
+  def requiredProperties: Map[String, String] =
     ExecManifest.requiredProperties ++
-      wskApiHost
+      wskApiHost ++
+      kafkaHosts
 }

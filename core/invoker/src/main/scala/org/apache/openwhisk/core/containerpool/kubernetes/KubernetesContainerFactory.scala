@@ -62,8 +62,7 @@ class KubernetesContainerFactory(
 
   override def cleanup() = {
     logging.info(this, "Cleaning up function runtimes")
-    val labels = Map("invoker" -> label)
-    val cleaning = kubernetes.rm(labels, true)(TransactionId.invokerNanny)
+    val cleaning = kubernetes.rm("invoker", label, true)(TransactionId.invokerNanny)
     Await.ready(cleaning, 30.seconds)
   }
 

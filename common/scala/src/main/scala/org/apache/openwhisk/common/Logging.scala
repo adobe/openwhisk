@@ -489,6 +489,17 @@ object LoggingMarkers {
         "initiator" -> invocationNamespace,
         "namespace" -> namespace,
         "action" -> action))(MeasurementUnit.none)
+  def INVOKER_KUBERNETES_FAILURE(failureType: String,
+                                 reason: String,
+                                 action: String,
+                                 namespace: String,
+                                 subject: String) =
+    LogMarkerToken(
+      invoker,
+      "kubeContainerFailure",
+      start,
+      Some(failureType),
+      Map("reason" -> reason, "action" -> action, "namespace" -> namespace, "subject" -> subject))(MeasurementUnit.none)
   val INVOKER_CONTAINER_HEALTH = LogMarkerToken(invoker, "containerHealth", start)(MeasurementUnit.time.milliseconds)
   val INVOKER_CONTAINER_HEALTH_FAILED_WARM =
     LogMarkerToken(invoker, "containerHealthFailed", counter, Some("warm"), Map("containerState" -> "warm"))(
@@ -523,6 +534,9 @@ object LoggingMarkers {
       MeasurementUnit.none)
   val CONTAINER_POOL_IDLES_SIZE =
     LogMarkerToken(containerPool, "idlesSize", counter)(MeasurementUnit.information.megabytes)
+
+  val CONTAINER_POOL_NONBLOCKING_RETRIES =
+    LogMarkerToken(containerPool, "nonblockingRetries", counter)(MeasurementUnit.none)
 
   val INVOKER_TOTALMEM_BLACKBOX = LogMarkerToken(loadbalancer, "totalCapacityBlackBox", counter)(MeasurementUnit.none)
   val INVOKER_TOTALMEM_MANAGED = LogMarkerToken(loadbalancer, "totalCapacityManaged", counter)(MeasurementUnit.none)

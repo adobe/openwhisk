@@ -24,10 +24,13 @@ import scala.concurrent.blocking
 import scala.concurrent.duration._
 import scala.util.Failure
 import org.apache.kafka.clients.consumer.CommitFailedException
-import akka.actor.FSM
+import akka.actor.{ActorRef, Cancellable, FSM}
 import akka.pattern.pipe
+import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.common.TransactionId
+
+import java.util.Date
 
 trait MessageConsumer {
 
@@ -60,6 +63,7 @@ object MessageFeed {
   protected[connector] case object Idle extends FeedState
   protected[connector] case object FillingPipeline extends FeedState
   protected[connector] case object DrainingPipeline extends FeedState
+  protected[connector] case object Done extends FeedState
 
   protected sealed trait FeedData
   private case object NoData extends FeedData
@@ -69,6 +73,11 @@ object MessageFeed {
 
   /** Steady state message, indicates capacity in downstream process to receive more messages. */
   object Processed
+
+  object Close
+  object Closed
+
+  private case class CheckEmpty(a: ActorRef)
 
   /** Indicates the fill operation has completed. */
   private case class FillCompleted(messages: Seq[(String, Int, Long, Array[Byte])])
@@ -97,7 +106,8 @@ class MessageFeed(description: String,
                   longPollDuration: FiniteDuration,
                   handler: Array[Byte] => Future[Unit],
                   autoStart: Boolean = true,
-                  logHandoff: Boolean = true)
+                  logHandoff: Boolean = true,
+                  emptyDuration: FiniteDuration = 30.seconds)
     extends FSM[MessageFeed.FeedState, MessageFeed.FeedData] {
   import MessageFeed._
 
@@ -119,6 +129,8 @@ class MessageFeed(description: String,
   private var handlerCapacity = maximumHandlerCapacity
 
   private implicit val tid = TransactionId.dispatcher
+  private var emptyTime: Option[Long] = None
+  private var checkFunction: Option[Cancellable] = None
 
   logging.info(
     this,
@@ -128,7 +140,11 @@ class MessageFeed(description: String,
     case Event(Ready, _) =>
       fillPipeline()
       goto(FillingPipeline)
-
+    case Event(CheckEmpty(r), _) =>
+      checkEmpty(r)
+    case Event(Close, _) =>
+      close(sender())
+      stay
     case _ => stay
   }
 
@@ -150,7 +166,11 @@ class MessageFeed(description: String,
       } else {
         goto(DrainingPipeline)
       }
-
+    case Event(CheckEmpty(r), _) =>
+      checkEmpty(r)
+    case Event(Close, _) =>
+      close(sender())
+      stay
     case _ => stay
   }
 
@@ -162,13 +182,55 @@ class MessageFeed(description: String,
         fillPipeline()
         goto(FillingPipeline)
       } else stay
-
+    case Event(CheckEmpty(r), _) =>
+      checkEmpty(r)
+    case Event(Close, _) =>
+      close(sender())
+      stay
     case _ => stay
+  }
+
+  when(Done) {
+    case Event(Close, _) =>
+      logging.info(this, "Already done asked to close, responding.")
+      sender ! Closed
+      consumer.close()
+      stay()
+    case Event(Processed, _) =>
+      logging.info(this, "Already done asked to close, responding.")
+      sender ! Closed
+      stay()
+    case Event(e, d) =>
+      logging.info(this, s"Got message while in Done ${e} / ${d}")
+      stay()
   }
 
   onTransition { case _ -> Idle => if (autoStart) self ! Ready }
   startWith(Idle, MessageFeed.NoData)
   initialize()
+
+  private def checkEmpty(requester: ActorRef) = {
+    val currentTime = (new Date()).getTime
+    val currentEmptyDuration = Duration(currentTime - emptyTime.getOrElse(currentTime), MILLISECONDS)
+    logging.info(this, s"Consumer has been empty for: ${currentEmptyDuration}")
+    if (currentEmptyDuration > emptyDuration && (outstandingMessages.size == 0)) {
+      logging.info(this, s"Consumer is done.")
+      checkFunction.map(f => f.cancel())
+      requester ! Closed
+      goto(Done)
+    } else {
+      fillPipeline()
+      stay()
+    }
+  }
+
+  private def close(r: ActorRef) = {
+    if (checkFunction.isEmpty) {
+      logging.debug(this, s"Begin probing consumer till it's empty for ${emptyDuration}")
+      implicit var ec = context.system.dispatcher
+      checkFunction = Some(context.system.scheduler.scheduleWithFixedDelay(1.seconds, 1.seconds, self, CheckEmpty(r)))
+    }
+  }
 
   private implicit val ec = context.system.dispatchers.lookup("dispatchers.kafka-dispatcher")
 
@@ -183,17 +245,36 @@ class MessageFeed(description: String,
           // While the commit is synchronous and will block until it completes, at steady
           // state with enough buffering (i.e., maxPipelineDepth > maxPeek), the latency
           // of the commit should be masked.
+          logging.debug(this, s"Asking for records from kafka: ${stateName}")
           val records = consumer.peek(longPollDuration)
           consumer.commit()
-          FillCompleted(records.toSeq)
+          logging.debug(this, s"Kafka commit complete: ${stateName}")
+          val records_seq = records.toSeq
+          if (checkFunction.isDefined) {
+            if (records_seq.size > 0) {
+              logging.debug(this, s"Kafka topic had ${records_seq.size} records, resetting time.")
+              emptyTime = None
+            } else if (emptyTime.isEmpty) {
+              logging.debug(this, s"Kafka topic had 0 records, now.")
+              emptyTime = Some(new Date().getTime)
+            }
+          }
+          logging.debug(this, s"Sending fill completed with ${records_seq.size} records: ${stateName}")
+          FillCompleted(records_seq)
         }
       }.andThen {
-          case Failure(e: CommitFailedException) =>
-            logging.error(this, s"failed to commit $description consumer offset: $e")
-          case Failure(e: Throwable) => logging.error(this, s"exception while pulling new $description records: $e")
-        }
+        case Failure(e: CommitFailedException) =>
+          logging.error(this, s"failed to commit $description consumer offset: $e")
+        case Failure(e: Throwable) => logging.error(this, s"exception while pulling new $description records: $e")
+      }
         .recover {
-          case _ => FillCompleted(Seq.empty)
+          case _ => {
+            if (emptyTime.isEmpty) {
+              logging.debug(this, s"Kafka topic errored when calling! assuming topic empty, now")
+              emptyTime = Some(new Date().getTime)
+            }
+            FillCompleted(Seq.empty)
+          }
         }
         .pipeTo(self)
     } else {
@@ -206,17 +287,31 @@ class MessageFeed(description: String,
   private def sendOutstandingMessages(): Unit = {
     val occupancy = outstandingMessages.size
     if (occupancy > 0 && handlerCapacity > 0) {
+      logging.debug(
+        this,
+        s"Sending message: ${outstandingMessages.size} to handler with handlerCapacity: ${handlerCapacity}")
       // Easiest way with an immutable queue to cleanly dequeue
-      // Head is the first elemeent of the queue, desugared w/ an assignment pattern
+      // Head is the first element of the queue, desugared w/ an assignment pattern
       // Tail is everything but the first element, thus mutating the collection variable
       val (topic, partition, offset, bytes) = outstandingMessages.head
       outstandingMessages = outstandingMessages.tail
 
       if (logHandoff) logging.debug(this, s"processing $topic[$partition][$offset] ($occupancy/$handlerCapacity)")
-      handler(bytes)
+      handler(bytes).andThen {
+        {
+          case Failure(e) =>
+            val stacktrace = ExceptionUtils.getStackTrace(e)
+            logging.error(this, s"Failed to process message for topic $topic : $e : stacktrace: $stacktrace")
+            e.printStackTrace()
+        }
+      }
       handlerCapacity -= 1
 
       sendOutstandingMessages()
+    } else {
+      logging.debug(
+        this,
+        s"Did not send messages to handler, due to outstanding messages: ${occupancy} and handlerCapacity: ${handlerCapacity}")
     }
   }
 

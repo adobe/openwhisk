@@ -18,7 +18,6 @@
 package org.apache.openwhisk.core.containerpool
 
 import java.time.Instant
-
 import akka.actor.ActorSystem
 import akka.event.Logging.InfoLevel
 import akka.stream.scaladsl.Source
@@ -30,7 +29,7 @@ import spray.json.JsObject
 import org.apache.openwhisk.common.{Logging, LoggingMarkers, TransactionId}
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.entity.ActivationResponse.{ContainerConnectionError, ContainerResponse}
-import org.apache.openwhisk.core.entity.{ActivationEntityLimit, ActivationResponse, ByteSize, WhiskAction}
+import org.apache.openwhisk.core.entity.{ActivationEntityLimit, ActivationResponse, ByteSize, WhiskAction, WhiskActivation}
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.http.Messages
 
@@ -74,6 +73,7 @@ trait Container {
   implicit protected val as: ActorSystem
   protected val id: ContainerId
   protected[core] val addr: ContainerAddress
+  protected[core] val node: Option[String] = None
   protected implicit val logging: Logging
   protected implicit val ec: ExecutionContext
 
@@ -85,6 +85,7 @@ trait Container {
   protected var containerHttpTimeout: FiniteDuration = 60.seconds
 
   def containerId: ContainerId = id
+  def hostNode: Option[String] = node
 
   /** Stops the container from consuming CPU cycles. NOT thread-safe - caller must synchronize. */
   def suspend()(implicit transid: TransactionId): Future[Unit] = {
@@ -105,7 +106,8 @@ trait Container {
   def logs(limit: ByteSize, waitForSentinel: Boolean)(implicit transid: TransactionId): Source[ByteString, Any]
 
   /** Completely destroys this instance of the container. */
-  def destroy()(implicit transid: TransactionId): Future[Unit] = {
+  def destroy(checkErrors: Boolean = false)(implicit transid: TransactionId,
+                                            activation: Option[WhiskActivation]): Future[Unit] = {
     closeConnections(httpConnection)
   }
 

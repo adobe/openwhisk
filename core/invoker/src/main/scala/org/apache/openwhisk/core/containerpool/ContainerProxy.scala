@@ -17,41 +17,18 @@
 
 package org.apache.openwhisk.core.containerpool
 
-import akka.actor.Actor
-import akka.actor.ActorRef
-import akka.actor.Cancellable
-import java.time.Instant
-
-import akka.actor.Status.{Failure => FailureMessage}
-import akka.actor.{FSM, Props, Stash}
-import akka.event.Logging.InfoLevel
-import akka.io.IO
-import akka.io.Tcp
-import akka.io.Tcp.Close
-import akka.io.Tcp.CommandFailed
-import akka.io.Tcp.Connect
-import akka.io.Tcp.Connected
-import akka.pattern.pipe
-import pureconfig.loadConfigOrThrow
 import pureconfig.generic.auto._
-import java.net.InetSocketAddress
-import java.net.SocketException
-
-import org.apache.openwhisk.common.MetricEmitter
+import akka.actor.Status.{Failure => FailureMessage}
+import akka.actor.{Actor, ActorRef, Cancellable, FSM, Props, Stash}
+import akka.event.Logging.InfoLevel
+import akka.io.{IO, Tcp}
+import akka.io.Tcp.{CommandFailed, Connect, Connected}
+import akka.pattern.pipe
 import org.apache.openwhisk.common.TransactionId.systemPrefix
-
-import scala.collection.immutable
-import spray.json.DefaultJsonProtocol._
-import spray.json._
-import org.apache.openwhisk.common.{AkkaLogging, Counter, LoggingMarkers, TransactionId}
+import org.apache.openwhisk.common._
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.ack.ActiveAck
-import org.apache.openwhisk.core.connector.{
-  ActivationMessage,
-  CombinedCompletionAndResultMessage,
-  CompletionMessage,
-  ResultMessage
-}
+import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletionAndResultMessage, CompletionMessage, ResultMessage}
 import org.apache.openwhisk.core.containerpool.logging.LogCollectingException
 import org.apache.openwhisk.core.database.UserContext
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
@@ -59,10 +36,16 @@ import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.invoker.Invoker.LogsCollector
 import org.apache.openwhisk.http.Messages
+import pureconfig.loadConfigOrThrow
+import spray.json.DefaultJsonProtocol._
+import spray.json._
 
+import java.net.{InetSocketAddress, SocketException}
+import java.time.Instant
+import scala.collection.immutable
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Random, Success}
 
 // States
 sealed trait ContainerState
@@ -99,7 +82,7 @@ sealed abstract class ContainerData(val lastUsed: Instant, val memoryLimit: Byte
 sealed abstract class ContainerNotStarted(override val lastUsed: Instant,
                                           override val memoryLimit: ByteSize,
                                           override val activeActivationCount: Int)
-    extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
+  extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
   override def getContainer = None
   override val initingState = "cold"
 }
@@ -109,7 +92,7 @@ sealed abstract class ContainerStarted(val container: Container,
                                        override val lastUsed: Instant,
                                        override val memoryLimit: ByteSize,
                                        override val activeActivationCount: Int)
-    extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
+  extends ContainerData(lastUsed, memoryLimit, activeActivationCount) {
   override def getContainer = Some(container)
 }
 
@@ -128,14 +111,14 @@ sealed abstract trait ContainerNotInUse {
 
 /** type representing a cold (not running) container */
 case class NoData(override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(Instant.EPOCH, 0.B, activeActivationCount)
+  extends ContainerNotStarted(Instant.EPOCH, 0.B, activeActivationCount)
     with ContainerNotInUse {
   override def nextRun(r: Run) = WarmingColdData(r.msg.user.namespace.name, r.action, Instant.now, 1)
 }
 
 /** type representing a cold (not running) container with specific memory allocation */
 case class MemoryData(override val memoryLimit: ByteSize, override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(Instant.EPOCH, memoryLimit, activeActivationCount)
+  extends ContainerNotStarted(Instant.EPOCH, memoryLimit, activeActivationCount)
     with ContainerNotInUse {
   override def nextRun(r: Run) = WarmingColdData(r.msg.user.namespace.name, r.action, Instant.now, 1)
 }
@@ -146,7 +129,7 @@ case class PreWarmedData(override val container: Container,
                          override val memoryLimit: ByteSize,
                          override val activeActivationCount: Int = 0,
                          expires: Option[Deadline] = None)
-    extends ContainerStarted(container, Instant.EPOCH, memoryLimit, activeActivationCount)
+  extends ContainerStarted(container, Instant.EPOCH, memoryLimit, activeActivationCount)
     with ContainerNotInUse {
   override val initingState = "prewarmed"
   override def nextRun(r: Run) =
@@ -160,7 +143,7 @@ case class WarmingData(override val container: Container,
                        action: ExecutableWhiskAction,
                        override val lastUsed: Instant,
                        override val activeActivationCount: Int = 0)
-    extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warming"
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
@@ -171,7 +154,7 @@ case class WarmingColdData(invocationNamespace: EntityName,
                            action: ExecutableWhiskAction,
                            override val lastUsed: Instant,
                            override val activeActivationCount: Int = 0)
-    extends ContainerNotStarted(lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerNotStarted(lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warmingCold"
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
@@ -184,7 +167,7 @@ case class WarmedData(override val container: Container,
                       override val lastUsed: Instant,
                       override val activeActivationCount: Int = 0,
                       resumeRun: Option[Run] = None)
-    extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
+  extends ContainerStarted(container, lastUsed, action.limits.memory.megabytes.MB, activeActivationCount)
     with ContainerInUse {
   override val initingState = "warmed"
   override def nextRun(r: Run) = copy(lastUsed = Instant.now, activeActivationCount = activeActivationCount + 1)
@@ -195,7 +178,13 @@ case class WarmedData(override val container: Container,
 
 // Events received by the actor
 case class Start(exec: CodeExec[_], memoryLimit: ByteSize, ttl: Option[FiniteDuration] = None)
-case class Run(action: ExecutableWhiskAction, msg: ActivationMessage, retryLogDeadline: Option[Deadline] = None)
+case class Run(action: ExecutableWhiskAction,
+               msg: ActivationMessage,
+               retryLogDeadline: Option[Deadline] = None,
+               retryCount: Int = 0) extends Runnable {
+
+  override def run(): Unit = copy(retryCount = retryCount + 1)
+}
 case object Remove
 case class HealthPingEnabled(enabled: Boolean)
 
@@ -245,12 +234,12 @@ case object RunCompleted
  * @param pauseGrace time to wait for new work before pausing the container
  */
 class ContainerProxy(factory: (TransactionId,
-                               String,
-                               ImageName,
-                               Boolean,
-                               ByteSize,
-                               Int,
-                               Option[ExecutableWhiskAction]) => Future[Container],
+  String,
+  ImageName,
+  Boolean,
+  ByteSize,
+  Int,
+  Option[ExecutableWhiskAction]) => Future[Container],
                      sendActiveAck: ActiveAck,
                      storeActivation: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
                      collectLogs: LogsCollector,
@@ -261,7 +250,7 @@ class ContainerProxy(factory: (TransactionId,
                      unusedTimeout: FiniteDuration,
                      pauseGrace: FiniteDuration,
                      testTcp: Option[ActorRef])
-    extends FSM[ContainerState, ContainerData]
+  extends FSM[ContainerState, ContainerData]
     with Stash {
   implicit val ec = context.system.dispatcher
   implicit val logging = new AkkaLogging(context.system.log)
@@ -275,9 +264,14 @@ class ContainerProxy(factory: (TransactionId,
   var activeCount = 0;
   var healthPingActor: Option[ActorRef] = None //setup after prewarm starts
   val tcp: ActorRef = testTcp.getOrElse(IO(Tcp)) //allows to testing interaction with Tcp extension
+  val rand: Random = new Random()
 
   startWith(Uninitialized, NoData())
 
+  override def postStop(): Unit = {
+    logging.info(this, s"stopping with state ${stateData} ")
+    super.postStop()
+  }
   when(Uninitialized) {
     // pre warm a container (creates a stem cell container)
     case Event(job: Start, _) =>
@@ -321,27 +315,30 @@ class ContainerProxy(factory: (TransactionId,
               PreWarmedData(container, job.action.exec.kind, job.action.limits.memory.megabytes.MB, 1, expires = None))
 
           case Failure(t) =>
-            // the container did not come up cleanly, so disambiguate the failure mode and then cleanup
-            // the failure is either the system fault, or for docker actions, the application/developer fault
-            val response = t match {
-              case WhiskContainerStartupError(msg) => ActivationResponse.whiskError(msg)
-              case BlackboxStartupError(msg)       => ActivationResponse.developerError(msg)
-              case _                               => ActivationResponse.whiskError(Messages.resourceProvisionError)
+            if (!handleRetry(job, Some(t))) {
+              // the container did not come up cleanly, so disambiguate the failure mode and then cleanup
+              // the failure is either the system fault, or for docker actions, the application/developer fault
+              val response = t match {
+                case WhiskContainerStartupError(msg) => ActivationResponse.whiskError(msg)
+                case BlackboxStartupError(msg)       => ActivationResponse.developerError(msg)
+                case _                               => ActivationResponse.whiskError(Messages.resourceProvisionError)
+              }
+              val context = UserContext(job.msg.user)
+              // construct an appropriate activation and record it in the datastore,
+              // also update the feed and active ack; the container cleanup is queued
+              // implicitly via a FailureMessage which will be processed later when the state
+              // transitions to Running
+              val activation =
+              ContainerProxy.constructWhiskActivation(job, None, Interval.zero, false, response, Some(instance))
+              sendActiveAck(
+                transid,
+                activation,
+                job.msg.blocking,
+                job.msg.rootControllerIndex,
+                job.msg.user.namespace.uuid,
+                CombinedCompletionAndResultMessage(transid, activation, instance))
+              storeActivation(transid, activation, job.msg.blocking, context)
             }
-            val context = UserContext(job.msg.user)
-            // construct an appropriate activation and record it in the datastore,
-            // also update the feed and active ack; the container cleanup is queued
-            // implicitly via a FailureMessage which will be processed later when the state
-            // transitions to Running
-            val activation = ContainerProxy.constructWhiskActivation(job, None, Interval.zero, false, response)
-            sendActiveAck(
-              transid,
-              activation,
-              job.msg.blocking,
-              job.msg.rootControllerIndex,
-              job.msg.user.namespace.uuid,
-              CombinedCompletionAndResultMessage(transid, activation, instance))
-            storeActivation(transid, activation, job.msg.blocking, context)
         }
         .flatMap { container =>
           // now attempt to inject the user code and run the action
@@ -362,6 +359,7 @@ class ContainerProxy(factory: (TransactionId,
     // container creation failed
     case Event(_: FailureMessage, _) =>
       context.parent ! ContainerRemoved(true)
+      logging.info(this, s"stopping with state ${stateData}")
       stop()
 
     case _ => delay
@@ -376,12 +374,12 @@ class ContainerProxy(factory: (TransactionId,
         .pipeTo(self)
       goto(Running) using PreWarmedData(data.container, data.kind, data.memoryLimit, 1, data.expires)
 
-    case Event(Remove, data: PreWarmedData) => destroyContainer(data, false)
+    case Event(Remove, _: PreWarmedData) => destroyContainer(false)
 
     // prewarm container failed
-    case Event(_: FailureMessage, data: PreWarmedData) =>
+    case Event(f: FailureMessage, data: PreWarmedData) =>
       MetricEmitter.emitCounterMetric(LoggingMarkers.INVOKER_CONTAINER_HEALTH_FAILED_PREWARM)
-      destroyContainer(data, true)
+      destroyContainer(true, cause = Some(f.cause))
   }
 
   when(Running) {
@@ -425,13 +423,13 @@ class ContainerProxy(factory: (TransactionId,
         goto(Ready) using newData
       }
     case Event(job: Run, data: WarmedData)
-        if activeCount >= data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if we are over concurrency limit, and not a failure on resume
+      if activeCount >= data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if we are over concurrency limit, and not a failure on resume
       implicit val transid = job.msg.transid
       logging.warn(this, s"buffering for maxed warm container ${data.container}; ${activeCount} activations in flight")
       runBuffer = runBuffer.enqueue(job)
       stay()
     case Event(job: Run, data: WarmedData)
-        if activeCount < data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if there was a delay, and not a failure on resume, skip the run
+      if activeCount < data.action.limits.concurrency.maxConcurrent && !rescheduleJob => //if there was a delay, and not a failure on resume, skip the run
       activeCount += 1
       implicit val transid = job.msg.transid
       bufferProcessing = false //reset buffer processing state
@@ -441,9 +439,10 @@ class ContainerProxy(factory: (TransactionId,
       stay() using data
 
     //ContainerHealthError should cause rescheduling of the job
-    case Event(FailureMessage(e: ContainerHealthError), data: WarmedData) =>
+    case Event(f @ FailureMessage(e: ContainerHealthError), data: WarmedData) =>
       implicit val tid = e.tid
       MetricEmitter.emitCounterMetric(LoggingMarkers.INVOKER_CONTAINER_HEALTH_FAILED_WARM)
+      context.parent ! ContainerRemoved(true)
       //resend to self will send to parent once we get to Removing state
       val newData = data.resumeRun
         .map { run =>
@@ -454,12 +453,14 @@ class ContainerProxy(factory: (TransactionId,
         .getOrElse(data)
       rescheduleJob = true
       rejectBuffered()
-      destroyContainer(newData, true)
+      activeCount -= 1
+      destroyAfterUse(f)
 
     // Failed after /init (the first run failed) on prewarmed or cold start
     // - container will be destroyed
     // - buffered will be aborted (if init fails, we assume it will always fail)
     case Event(f: FailureMessage, data: PreWarmedData) =>
+      implicit val tid: TransactionId = getTidFromCause(f.cause)
       logging.error(
         this,
         s"Failed during init of cold container ${data.getContainer}, queued activations will be aborted.")
@@ -467,37 +468,38 @@ class ContainerProxy(factory: (TransactionId,
       activeCount -= 1
       //reuse an existing init failure for any buffered activations that will be aborted
       val r = f.cause match {
-        case ActivationUnsuccessfulError(r) => Some(r.response)
-        case _                              => None
+        case ActivationUnsuccessfulError(r, _) => Some(r.response)
+        case _                                 => None
       }
-      destroyContainer(data, true, true, r)
+      destroyContainer(true, true, r, cause = Some(f.cause))
 
     // Failed for a subsequent /run
     // - container will be destroyed
     // - buffered will be resent (at least 1 has completed, so others are given a chance to complete)
-    case Event(_: FailureMessage, data: WarmedData) =>
+    case Event(f: FailureMessage, data: WarmedData) =>
+      implicit val tid: TransactionId = getTidFromCause(f.cause)
       logging.error(
         this,
-        s"Failed during use of warm container ${data.getContainer}, queued activations will be resent.")
+        s"Failed with ${f.cause.getMessage} during use of warm container ${data.getContainer}, ${runBuffer.size} queued activations will be resent.")
       activeCount -= 1
-      if (activeCount == 0) {
-        destroyContainer(data, true)
-      } else {
-        //signal that this container is going away (but don't remove it yet...)
-        rescheduleJob = true
-        goto(Removing)
-      }
+      context.parent ! ContainerRemoved(true)
+      destroyAfterUse(f)
 
     // Failed at getting a container for a cold-start run
     // - container will be destroyed
     // - buffered will be aborted (if cold start container fails to start, we assume it will continue to fail)
-    case Event(_: FailureMessage, _) =>
-      logging.error(this, "Failed to start cold container, queued activations will be aborted.")
+    case Event(f: FailureMessage, _) =>
+      implicit val tid: TransactionId = getTidFromCause(f.cause)
+      logging.error(
+        this,
+        s"Failed to start cold container due to ${f.cause.getMessage}, ${runBuffer.size} queued activations will be aborted or retried.")
       activeCount -= 1
-      context.parent ! ContainerRemoved(true)
-      abortBuffered()
-      rescheduleJob = true
-      goto(Removing)
+      val abortResponse = Some(f.cause match {
+        case WhiskContainerStartupError(msg) => ActivationResponse.whiskError(msg)
+        case BlackboxStartupError(msg)       => ActivationResponse.developerError(msg)
+        case _                               => ActivationResponse.whiskError(Messages.resourceProvisionError)
+      })
+      destroyContainer(true, true, abortResponse, cause = Some(f.cause))
 
     case _ => delay
   }
@@ -518,17 +520,18 @@ class ContainerProxy(factory: (TransactionId,
       data.container.suspend()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
       goto(Pausing)
 
-    case Event(Remove, data: WarmedData) => destroyContainer(data, true)
+    case Event(Remove, _: WarmedData) => destroyContainer(true)
 
     // warm container failed
-    case Event(_: FailureMessage, data: WarmedData) =>
-      destroyContainer(data, true)
+    case Event(f: FailureMessage, _: WarmedData) =>
+      destroyContainer(true, cause = Some(f.cause))
   }
 
   when(Pausing) {
-    case Event(ContainerPaused, data: WarmedData)   => goto(Paused)
-    case Event(_: FailureMessage, data: WarmedData) => destroyContainer(data, true)
-    case _                                          => delay
+    case Event(ContainerPaused, _: WarmedData) => goto(Paused)
+    case Event(f: FailureMessage, _: WarmedData) =>
+      destroyContainer(true, cause = Some(f.cause))
+    case _ => delay
   }
 
   when(Paused, stateTimeout = unusedTimeout) {
@@ -554,7 +557,7 @@ class ContainerProxy(factory: (TransactionId,
     // container is reclaimed by the pool or it has become too old
     case Event(StateTimeout | Remove, data: WarmedData) =>
       rescheduleJob = true // to supress sending message to the pool and not double count
-      destroyContainer(data, true)
+      destroyContainer(true)
   }
 
   when(Removing) {
@@ -568,20 +571,21 @@ class ContainerProxy(factory: (TransactionId,
       val newData = data.withoutResumeRun()
       //if there are items in runbuffer, process them if there is capacity, and stay; otherwise if we have any pending activations, also stay
       if (activeCount == 0) {
-        destroyContainer(newData, true)
+        destroyContainer(true, alreadyRemoved = true)
       } else {
-        stay using newData
+        stay using data.withoutResumeRun()
       }
     case Event(ContainerRemoved(_), _) =>
+      logging.info(this, s"stopping with state ${stateData}")
       stop()
     // Run failed, after another failed concurrent Run
-    case Event(_: FailureMessage, data: WarmedData) =>
+    case Event(f: FailureMessage, data: WarmedData) =>
       activeCount -= 1
       val newData = data.withoutResumeRun()
       if (activeCount == 0) {
-        destroyContainer(newData, true)
+        destroyContainer(true, cause = Some(f.cause), alreadyRemoved = true)
       } else {
-        stay using newData
+        stay using data.withoutResumeRun()
       }
   }
 
@@ -610,6 +614,44 @@ class ContainerProxy(factory: (TransactionId,
 
   initialize()
 
+  /**
+   * For async, retry-instead-of-fail is optional
+   * @param job
+   * @return true if this activation will be retried
+   */
+  def handleRetry(job: Run, t: Option[Throwable])(implicit transid: TransactionId): Boolean = {
+    poolConfig.nonBlockingRetryConfig.exists { retryConfig =>
+      if (job.msg.blocking) {
+        false //blocking is never retried
+      } else if (job.retryCount <= retryConfig.retryLimit) {
+        t match {
+          case Some(b: BlackboxStartupError) =>
+            logging.error(
+              this,
+              s"cold start failed for non-blocking activation ${job.msg.activationId} due to startup error ${b.getMessage}. It will not be retried.")
+            false
+          case _ =>
+            val delay = if (retryConfig.delayVariance > 0) {
+              retryConfig.delay.plus(rand.nextInt(retryConfig.delayVariance).seconds)
+            } else {
+              retryConfig.delay
+            }
+            logging.info(
+              this,
+              s"cold start failed for non-blocking activation ${job.msg.activationId} with ${job.retryCount} retries, it will be retried in ${delay.toSeconds} seconds.")
+            MetricEmitter.emitCounterMetric(LoggingMarkers.CONTAINER_POOL_NONBLOCKING_RETRIES)
+            context.system.scheduler.scheduleOnce(delay, job)
+            true //nonblocking within retry limit
+        }
+      } else {
+        logging.info(
+          this,
+          s"cold start failed for non-blocking activation ${job.msg.activationId} with ${job.retryCount} retries, and retries exceeded limit ${retryConfig.retryLimit}")
+        false //nonblocking but exceeded retry limit
+      }
+    }
+  }
+
   /** Either process runbuffer or signal parent to send work; return true if runbuffer is being processed */
   def requestWork(newData: WarmedData): Boolean = {
     //if there is concurrency capacity, process runbuffer, signal NeedWork, or both
@@ -635,16 +677,18 @@ class ContainerProxy(factory: (TransactionId,
 
   /** Process buffered items up to the capacity of action concurrency config */
   def processBuffer(action: ExecutableWhiskAction, newData: ContainerData) = {
-    //send as many buffered as possible
-    val available = action.limits.concurrency.maxConcurrent - activeCount
-    logging.info(this, s"resending up to ${available} from ${runBuffer.length} buffered jobs")
-    1 to available foreach { _ =>
-      runBuffer.dequeueOption match {
-        case Some((run, q)) =>
-          self ! run
-          bufferProcessing = true
-          runBuffer = q
-        case _ =>
+    if (runBuffer.nonEmpty) {
+      //send as many buffered as possible
+      val available = action.limits.concurrency.maxConcurrent - activeCount
+      logging.info(this, s"resending up to ${available} from ${runBuffer.length} buffered jobs")
+      1 to available foreach { _ =>
+        runBuffer.dequeueOption match {
+          case Some((run, q)) =>
+            self ! run
+            bufferProcessing = true
+            runBuffer = q
+          case _ =>
+        }
       }
     }
   }
@@ -655,78 +699,116 @@ class ContainerProxy(factory: (TransactionId,
     stay
   }
 
-  /**
-   * Destroys the container after unpausing it if needed. Can be used
-   * as a state progression as it goes to Removing.
-   *
-   * @param newData the ContainerStarted which container will be destroyed
-   */
-  def destroyContainer(newData: ContainerStarted,
-                       replacePrewarm: Boolean,
-                       abort: Boolean = false,
-                       abortResponse: Option[ActivationResponse] = None) = {
-    val container = newData.container
-    if (!rescheduleJob) {
-      context.parent ! ContainerRemoved(replacePrewarm)
-    } else {
-      context.parent ! RescheduleJob
-    }
-    val abortProcess = if (abort && runBuffer.nonEmpty) {
-      abortBuffered(abortResponse)
-    } else {
-      rejectBuffered()
-      Future.successful(())
-    }
+  def destroyAfterUse(f: FailureMessage) = {
+    //signal parent to remove this container asap - but it should keep running till activeCount is 0
 
-    val unpause = stateName match {
-      case Paused => container.resume()(TransactionId.invokerNanny)
-      case _      => Future.successful(())
-    }
-
-    unpause
-      .flatMap(_ => container.destroy()(TransactionId.invokerNanny))
-      .flatMap(_ => abortProcess)
-      .map(_ => ContainerRemoved(replacePrewarm))
-      .pipeTo(self)
-    if (stateName != Removing) {
-      goto(Removing) using newData
+    if (activeCount == 0) {
+      destroyContainer(true, cause = Some(f.cause), alreadyRemoved = true)
     } else {
-      stay using newData
+      //signal that this container is going away (but don't remove it yet...)
+      rescheduleJob = true
+      goto(Removing)
     }
   }
 
-  def abortBuffered(abortResponse: Option[ActivationResponse] = None): Future[Any] = {
-    logging.info(this, s"aborting ${runBuffer.length} queued activations after failed init or failed cold start")
-    val f = runBuffer.flatMap { job =>
-      implicit val tid = job.msg.transid
-      logging.info(
-        this,
-        s"aborting activation ${job.msg.activationId} after failed init or cold start with ${abortResponse}")
-      val result = ContainerProxy.constructWhiskActivation(
-        job,
-        None,
-        Interval.zero,
-        false,
-        abortResponse.getOrElse(ActivationResponse.whiskError(Messages.abnormalRun)))
-      val context = UserContext(job.msg.user)
-      val msg = if (job.msg.blocking) {
-        CombinedCompletionAndResultMessage(tid, result, instance)
-      } else {
-        CompletionMessage(tid, result, instance)
+  /**
+   * Destroys the container after unpausing it if needed. Can be used
+   * as a state progression as it goes to Removing.
+   */
+  def destroyContainer(replacePrewarm: Boolean,
+                       abort: Boolean = false,
+                       abortResponse: Option[ActivationResponse] = None,
+                       cause: Option[Throwable] = None,
+                       alreadyRemoved: Boolean = false) = {
+    if (!rescheduleJob) {
+      if (!alreadyRemoved) {
+        context.parent ! ContainerRemoved(replacePrewarm)
       }
-      val ack =
+    } else {
+      context.parent ! RescheduleJob
+    }
+    if (abort && runBuffer.nonEmpty) {
+      abortBuffered(abortResponse, cause)
+    } else {
+      rejectBuffered()
+    }
+    //associate the tid of a failed in-flight transaction with the destroy process
+    implicit val (tid, activation): (TransactionId, Option[WhiskActivation]) = cause match {
+      case Some(c: ActivationUnsuccessfulError) => (c.tid, Some(c.activation))
+      case Some(c: ContainerHealthError)        => (c.tid, None)
+      case _                                    => (TransactionId.invokerNanny, None)
+    }
+    if (activeCount > 0) {
+      logging.error(this, s"Container terminating while ${activeCount} still in flight.")
+    }
+    stateData match {
+      case started: ContainerStarted =>
+        val d = started match {
+          case w: WarmedData => w.withoutResumeRun()
+          case c             => c
+        }
+
+        val container = d.container
+        val unpause = stateName match {
+          case Paused => container.resume()
+          case _      => Future.successful(())
+        }
+
+        unpause
+          .flatMap(_ => container.destroy(cause.isDefined))
+          .map(_ => ContainerRemoved(replacePrewarm))
+          .pipeTo(self)
+        if (stateName != Removing) {
+          goto(Removing) using d
+        } else {
+          stay using d
+        }
+      case _ =>
+        self ! ContainerRemoved(replacePrewarm)
+        if (stateName != Removing) {
+          goto(Removing)
+        } else {
+          stay
+        }
+    }
+  }
+
+  def getTidFromCause(cause: Throwable) =
+    cause match {
+      case c: ActivationUnsuccessfulError => c.tid
+      case _                              => TransactionId.unknown
+    }
+
+  def abortBuffered(abortResponse: Option[ActivationResponse] = None, cause: Option[Throwable] = None) = {
+    logging.info(this, s"aborting ${runBuffer.length} queued activations after failed init or failed cold start")
+    runBuffer.foreach { job =>
+      implicit val tid = job.msg.transid
+      if (!handleRetry(job, cause)) {
+        logging.info(
+          this,
+          s"aborting activation ${job.msg.activationId} after failed init or cold start with ${abortResponse}")
+        val result = ContainerProxy.constructWhiskActivation(
+          job,
+          None,
+          Interval.zero,
+          false,
+          abortResponse.getOrElse(ActivationResponse.whiskError(Messages.abnormalRun)),
+          Some(instance))
+        val context = UserContext(job.msg.user)
+        val msg = if (job.msg.blocking) {
+          CombinedCompletionAndResultMessage(tid, result, instance)
+        } else {
+          CompletionMessage(tid, result, instance)
+        }
         sendActiveAck(tid, result, job.msg.blocking, job.msg.rootControllerIndex, job.msg.user.namespace.uuid, msg)
           .andThen {
             case Failure(e) => logging.error(this, s"failed to send abort ack $e")
           }
-      val store = storeActivation(tid, result, job.msg.blocking, context)
-        .andThen {
+        storeActivation(tid, result, job.msg.blocking, context).andThen {
           case Failure(e) => logging.error(this, s"failed to store aborted activation $e")
         }
-      //return both futures
-      Seq(ack, store)
+      }
     }
-    Future.sequence(f)
   }
 
   /**
@@ -841,7 +923,10 @@ class ContainerProxy(factory: (TransactionId,
                 initInterval,
                 initRunInterval,
                 runInterval.duration >= actionTimeout,
-                response)
+                response,
+                Some(instance),
+                container.hostNode,
+                Some(container.containerId.asString))
           }
       }
       .recoverWith {
@@ -850,7 +935,9 @@ class ContainerProxy(factory: (TransactionId,
         case InitializationError(interval, response) =>
           Future.successful(
             ContainerProxy
-              .constructWhiskActivation(job, Some(interval), interval, interval.duration >= actionTimeout, response))
+              .constructWhiskActivation(job, Some(interval), interval, interval.duration >= actionTimeout, response, Some(instance),
+                container.hostNode,
+                Some(container.containerId.asString)))
         case t =>
           // Actually, this should never happen - but we want to make sure to not miss a problem
           logging.error(this, s"caught unexpected error while running activation: ${t}")
@@ -860,7 +947,10 @@ class ContainerProxy(factory: (TransactionId,
               None,
               Interval.zero,
               false,
-              ActivationResponse.whiskError(Messages.abnormalRun)))
+              ActivationResponse.whiskError(Messages.abnormalRun),
+              Some(instance),
+              container.hostNode,
+              Some(container.containerId.asString)))
       }
 
     val splitAckMessagesPendingLogCollection = collectLogs.logsToBeCollected(job.action)
@@ -938,10 +1028,10 @@ class ContainerProxy(factory: (TransactionId,
         Future.successful(act)
       case Right(act) =>
         if ((act.response.isContainerError && activationErrorLoggingConfig.developerErrors) ||
-            (act.response.isWhiskError && activationErrorLoggingConfig.whiskErrors)) {
+          (act.response.isWhiskError && activationErrorLoggingConfig.whiskErrors)) {
           logTruncatedError(act)
         }
-        Future.failed(ActivationUnsuccessfulError(act))
+        Future.failed(ActivationUnsuccessfulError(act, tid))
       case Left(error) => Future.failed(error)
     }
   }
@@ -969,19 +1059,19 @@ final case class ContainerProxyActivationErrorLogConfig(applicationErrors: Boole
 
 object ContainerProxy {
   def props(factory: (TransactionId,
-                      String,
-                      ImageName,
-                      Boolean,
-                      ByteSize,
-                      Int,
-                      Option[ExecutableWhiskAction]) => Future[Container],
+    String,
+    ImageName,
+    Boolean,
+    ByteSize,
+    Int,
+    Option[ExecutableWhiskAction]) => Future[Container],
             ack: ActiveAck,
             store: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
             collectLogs: LogsCollector,
             instance: InvokerInstanceId,
             poolConfig: ContainerPoolConfig,
             healthCheckConfig: ContainerProxyHealthCheckConfig =
-              loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
+            loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
             activationErrorLogConfig: ContainerProxyActivationErrorLogConfig = activationErrorLogging,
             unusedTimeout: FiniteDuration = timeouts.idleContainer,
             pauseGrace: FiniteDuration = timeouts.pauseGrace,
@@ -1035,7 +1125,10 @@ object ContainerProxy {
                                initInterval: Option[Interval],
                                totalInterval: Interval,
                                isTimeout: Boolean,
-                               response: ActivationResponse) = {
+                               response: ActivationResponse,
+                               invokerInstanceId: Option[InvokerInstanceId] = None,
+                               actionHost: Option[String] = None,
+                               podName: Option[String] = None): WhiskActivation = {
     val causedBy = if (job.msg.causedBySequence) {
       Some(Parameters(WhiskActivation.causedByAnnotation, JsString(Exec.SEQUENCE)))
     } else None
@@ -1069,7 +1162,10 @@ object ContainerProxy {
           Parameters(WhiskActivation.kindAnnotation, JsString(job.action.exec.kind)) ++
           Parameters(WhiskActivation.timeoutAnnotation, JsBoolean(isTimeout)) ++
           causedBy ++ initTime ++ waitTime ++ binding
-      })
+      },
+      invokerInstanceId = invokerInstanceId,
+      actionHost = actionHost,
+      podName = podName)
   }
 
   /**
@@ -1112,7 +1208,7 @@ class TCPPingClient(tcp: ActorRef,
                     containerId: String,
                     remote: InetSocketAddress,
                     config: ContainerProxyHealthCheckConfig)
-    extends Actor {
+  extends Actor {
   implicit val logging = new AkkaLogging(context.system.log)
   implicit val ec = context.system.dispatcher
   implicit var healthPingTx = TransactionId.actionHealthPing
@@ -1177,7 +1273,7 @@ trait ActivationError extends Exception {
 }
 
 /** Indicates an activation with a non-successful response */
-case class ActivationUnsuccessfulError(activation: WhiskActivation) extends ActivationError
+case class ActivationUnsuccessfulError(activation: WhiskActivation, tid: TransactionId) extends ActivationError
 
 /** Indicates reading logs for an activation failed (terminally, truncated) */
 case class ActivationLogReadingError(activation: WhiskActivation) extends ActivationError

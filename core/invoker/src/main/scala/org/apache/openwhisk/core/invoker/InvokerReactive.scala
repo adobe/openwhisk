@@ -19,10 +19,13 @@ package org.apache.openwhisk.core.invoker
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
-
 import akka.Done
 import akka.actor.{ActorRefFactory, ActorSystem, CoordinatedShutdown, Props}
 import akka.event.Logging.InfoLevel
+import akka.pattern.ask
+import akka.util.Timeout
+import kamon.metric.MeasurementUnit
+import org.apache.openwhisk.common.LoggingMarkers.start
 import org.apache.openwhisk.common._
 import org.apache.openwhisk.common.tracing.WhiskTracerProvider
 import org.apache.openwhisk.core.ack.{MessagingActiveAck, UserEventSender}
@@ -32,6 +35,7 @@ import org.apache.openwhisk.core.containerpool.logging.LogStoreProvider
 import org.apache.openwhisk.core.database.{UserContext, _}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
+import org.apache.openwhisk.core.invoker.InvokerReactive.kubernetesSocketTimeout
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.spi.SpiLoader
@@ -44,6 +48,9 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
 object InvokerReactive extends InvokerProvider {
+
+  // Set to true in case KubernetesClient starts experiencing SocketTimeoutException
+  var kubernetesSocketTimeout = false
 
   override def instance(
     config: WhiskConfig,
@@ -67,8 +74,13 @@ class InvokerReactive(
 
   implicit val ec: ExecutionContext = actorSystem.dispatcher
   implicit val cfg: WhiskConfig = config
+  private var isShuttingDown = false
 
   private val logsProvider = SpiLoader.get[LogStoreProvider].instance(actorSystem)
+  protected val drainActivationTimeout =
+    loadConfig[FiniteDuration](ConfigKeys.invokerActionDrainDuration).getOrElse(120.seconds)
+  protected val messageFeedEmptyDuration =
+    loadConfig[FiniteDuration](ConfigKeys.messageFeedEmptyDuration).getOrElse(30.seconds)
   logging.info(this, s"LogStoreProvider: ${logsProvider.getClass}")
 
   /**
@@ -93,9 +105,25 @@ class InvokerReactive(
   containerFactory.init()
 
   CoordinatedShutdown(actorSystem)
-    .addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "cleanup runtime containers") { () =>
-      containerFactory.cleanup()
-      Future.successful(Done)
+    .addTask(CoordinatedShutdown.PhaseBeforeServiceUnbind, "cleanup runtime containers") { () =>
+      val invokerShutdown = TransactionId.invokerShutdown.started(
+        this,
+        LogMarkerToken("invoker", "shutdown", start)(MeasurementUnit.time.milliseconds),
+        s"Starting shutdown with timeout ${drainActivationTimeout}",
+        InfoLevel)
+      isShuttingDown = true
+      implicit val timeout: Timeout = Timeout(drainActivationTimeout)
+      implicit val transactionId: TransactionId = TransactionId.invokerShutdown
+      logging.info(this, "Asking pool to drain and close.")(TransactionId.invokerShutdown)
+      val poolClosed = pool ? org.apache.openwhisk.core.containerpool.Close
+      val f = for {
+        poolDone <- poolClosed
+      } yield (poolDone)
+      f.map { _ =>
+        containerFactory.cleanup()
+        TransactionId.invokerShutdown.finished(this, invokerShutdown, "Invoker shutdown complete.", InfoLevel)
+        Done
+      }
     }
 
   /** Initialize needed databases */
@@ -128,7 +156,15 @@ class InvokerReactive(
     msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
 
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage)
+    new MessageFeed(
+      "activation",
+      logging,
+      consumer,
+      maxPeek,
+      1.second,
+      processActivationMessage,
+      emptyDuration = messageFeedEmptyDuration
+    )
   })
 
   private val ack = {
@@ -292,9 +328,16 @@ class InvokerReactive(
 
   private val healthProducer = msgProvider.getProducer(config)
   Scheduler.scheduleWaitAtMost(1.seconds)(() => {
-    healthProducer.send("health", PingMessage(instance)).andThen {
-      case Failure(t) => logging.error(this, s"failed to ping the controller: $t")
+    if (isShuttingDown) {
+      logging.info(this, "Skipping health ping due to pending shutdown")
+      Future.successful(Done)
+    } else if (kubernetesSocketTimeout) { // Stop sending healthy pings to controller in case the KubernetesClient start experiencing SocketTimeoutException
+      logging.info(this, "Skipping health ping due to SocketTimeoutException on KubernetesClient")
+      Future.successful(Done)
+    } else {
+      healthProducer.send("health", PingMessage(instance)).andThen {
+        case Failure(t) => logging.error(this, s"failed to ping the controller: $t")
+      }
     }
   })
-
 }

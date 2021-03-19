@@ -61,7 +61,10 @@ case class WhiskActivation(namespace: EntityPath,
                            version: SemVer = SemVer(),
                            publish: Boolean = false,
                            annotations: Parameters = Parameters(),
-                           duration: Option[Long] = None)
+                           duration: Option[Long] = None,
+                           invokerInstanceId: Option[InvokerInstanceId] = None,
+                           actionHost: Option[String] = None,
+                           podName: Option[String] = None)
     extends WhiskEntity(EntityName(activationId.asString), "activation") {
 
   require(cause != null, "cause undefined")
@@ -179,7 +182,7 @@ object WhiskActivation
    */
   lazy val filtersView = WhiskQueries.view(WhiskQueries.dbConfig.activationsFilterDdoc, collectionName)
 
-  override implicit val serdes = jsonFormat13(WhiskActivation.apply)
+  override implicit val serdes = jsonFormat16(WhiskActivation.apply)
 
   // Caching activations doesn't make much sense in the common case as usually,
   // an activation is only asked for once.
