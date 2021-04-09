@@ -23,6 +23,8 @@ import javax.net.ssl.{KeyManagerFactory, SSLContext, TrustManagerFactory}
 import akka.http.scaladsl.{ConnectionContext, HttpsConnectionContext}
 import akka.stream.TLSClientAuth
 
+import scala.util.Try
+
 object Https {
   case class HttpsConfig(keystorePassword: String, keystoreFlavor: String, keystorePath: String, clientAuth: String)
 
@@ -45,7 +47,7 @@ object Https {
   def applyHttpsConfig(httpsConfig: HttpsConfig, withDisableHostnameVerification: Boolean = false): SSLContext = {
     val keyFactoryType = "SunX509"
     val clientAuth = {
-      if (httpsConfig.clientAuth.toBoolean)
+      if (Try(httpsConfig.clientAuth.toBoolean).getOrElse(false))
         Some(TLSClientAuth.need)
       else
         Some(TLSClientAuth.none)

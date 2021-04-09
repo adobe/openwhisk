@@ -37,14 +37,19 @@ dependencies {
     compile "io.spray:spray-json_${gradle.scala.depVersion}:1.3.5"
     compile "com.lihaoyi:fastparse_${gradle.scala.depVersion}:2.1.3"
 
-    compile "com.typesafe.akka:akka-actor_${gradle.scala.depVersion}:${gradle.akka.version}"
+    compile "com.typesafe.akka:akka-actor-typed_${gradle.scala.depVersion}:${gradle.akka.version}"
+    compile "com.typesafe.akka:akka-cluster-typed_${gradle.scala.depVersion}:${gradle.akka.version}"
     compile "com.typesafe.akka:akka-stream_${gradle.scala.depVersion}:${gradle.akka.version}"
     compile "com.typesafe.akka:akka-slf4j_${gradle.scala.depVersion}:${gradle.akka.version}"
+    compile "com.typesafe.akka:akka-serialization-jackson_${gradle.scala.depVersion}:${gradle.akka.version}"
 
     compile "com.typesafe.akka:akka-http-core_${gradle.scala.depVersion}:${gradle.akka_http.version}"
     compile "com.typesafe.akka:akka-http-spray-json_${gradle.scala.depVersion}:${gradle.akka_http.version}"
 
     compile "com.lightbend.akka:akka-stream-alpakka-file_${gradle.scala.depVersion}:1.1.2"
+
+    compile "com.twitter:chill_${gradle.scala.depVersion}:0.9.5"
+    compile "com.twitter:chill-akka_${gradle.scala.depVersion}:0.9.5"
 
     compile "ch.qos.logback:logback-classic:1.2.3"
     compile "org.slf4j:jcl-over-slf4j:1.7.25"
