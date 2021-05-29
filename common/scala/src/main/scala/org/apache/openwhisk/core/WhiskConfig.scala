@@ -203,6 +203,7 @@ object WhiskConfig {
 object ConfigKeys {
   val cluster = "whisk.cluster"
   val loadbalancer = "whisk.loadbalancer"
+  val fraction = "whisk.fraction"
   val buildInformation = "whisk.info"
 
   val couchdb = "whisk.couchdb"
@@ -212,6 +213,8 @@ object ConfigKeys {
   val kafkaProducer = s"$kafka.producer"
   val kafkaConsumer = s"$kafka.consumer"
   val kafkaTopics = s"$kafka.topics"
+  val kafkaTopicsPrefix = s"$kafkaTopics.prefix"
+  val kafkaTopicsUserEventPrefix = s"$kafkaTopics.user-event.prefix"
 
   val memory = "whisk.memory"
   val timeLimit = "whisk.time-limit"

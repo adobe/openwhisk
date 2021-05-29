@@ -18,7 +18,6 @@
 package org.apache.openwhisk.core.containerpool.mesos.test
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.Sink
 import akka.testkit.TestKit
 import akka.testkit.TestProbe
@@ -84,7 +83,7 @@ class MesosContainerFactoryTest
   }
 
   // 80 slots, each 265MB
-  val poolConfig = ContainerPoolConfig(21200.MB, 0.5, false, 1.minute, None, 100)
+  val poolConfig = ContainerPoolConfig(21200.MB, 0.5, false, 2.second, 1.minute, None, 100, 3, false, 1.seconds)
   val actionMemory = 265.MB
   val mesosCpus = poolConfig.cpuShare(actionMemory) / 1024.0
 
@@ -327,7 +326,6 @@ class MesosContainerFactoryTest
     val container = await(c)
 
     implicit val tid = TransactionId.testing
-    implicit val m = ActorMaterializer()
     val logs = container
       .logs(actionMemory, false)
       .via(DockerToActivationLogStore.toFormattedString)

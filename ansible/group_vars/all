@@ -139,6 +139,8 @@ registry:
   confdir: "{{ config_root_dir }}/registry"
 
 kafka:
+  topicsPrefix: "{{ kafka_topics_prefix | default('') }}"
+  topicsUserEventPrefix: "{{ kafka_topics_userEvent_prefix | default(kafka_topics_prefix) | default('') }}"
   ssl:
     client_authentication: required
     keystore:
@@ -151,7 +153,7 @@ kafka:
     protocols:
     - TLSv1.2
   protocol: "{{ kafka_protocol_for_setup }}"
-  version: 2.12-2.3.1
+  version: "{{ kafka_version | default('2.13-2.7.0') }}"
   port: 9072
   advertisedPort: 9093
   ras:
@@ -219,6 +221,8 @@ invoker:
     keystore:
       password: "{{ invoker_keystore_password | default('openwhisk') }}"
       name: "{{ __invoker_ssl_keyPrefix }}openwhisk-keystore.p12"
+  reactiveSpi: "{{ invokerReactive_spi | default('') }}"
+  serverSpi: "{{ invokerServer_spi | default('') }}"
 
 userLogs:
   spi: "{{ userLogs_spi | default('org.apache.openwhisk.core.containerpool.logging.DockerToActivationLogStoreProvider') }}"
@@ -452,5 +456,6 @@ etcd_connect_string: "{% set ret = [] %}\
                       {{ ret | join(',') }}"
 
 scheduler:
+  protocol: "{{ scheduler_protocol | default('http') }}"
   dataManagementService:
     retryInterval: "{{ scheduler_dataManagementService_retryInterval | default('1 second') }}"

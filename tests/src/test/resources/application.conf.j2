@@ -29,6 +29,10 @@ whisk {
                 retention-bytes = 1073741824
                 retention-ms    = 3600000
             }
+            prefix = "{{ kafka.topicsPrefix }}"
+            user-event {
+                prefix = "{{ kafka.topicsUserEventPrefix }}"
+            }
         }
         common {
           security-protocol: {{ kafka.protocol }}
@@ -128,6 +132,11 @@ whisk {
             threads = "{{ etcd.pool_threads }}"
         }
     }
+
+    scheduler {
+        protocol = "{{ scheduler.protocol }}"
+    }
+
 }
 
 #test-only overrides so that tests can override defaults in application.conf (todo: move all defaults to reference.conf)
