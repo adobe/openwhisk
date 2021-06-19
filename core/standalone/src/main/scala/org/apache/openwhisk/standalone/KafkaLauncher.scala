@@ -20,7 +20,6 @@ package org.apache.openwhisk.standalone
 import java.io.File
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 import kafka.server.KafkaConfig
 import net.manub.embeddedkafka.{EmbeddedKafka, EmbeddedKafkaConfig}
 import org.apache.commons.io.FileUtils
@@ -28,23 +27,20 @@ import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.WhiskConfig.kafkaHosts
 import org.apache.openwhisk.core.entity.ControllerInstanceId
-import org.apache.openwhisk.core.loadBalancer.{LeanBalancer, LoadBalancer, LoadBalancerProvider}
+import org.apache.openwhisk.core.loadBalancer.{LoadBalancer, LoadBalancerProvider, MuxBalancer}
 import org.apache.openwhisk.standalone.StandaloneDockerSupport.{checkOrAllocatePort, containerName, createRunCmd}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.reflect.io.Directory
 import scala.util.Try
 
-class KafkaLauncher(docker: StandaloneDockerClient,
-                    kafkaPort: Int,
-                    kafkaDockerPort: Int,
-                    zkPort: Int,
-                    workDir: File,
-                    kafkaUi: Boolean)(implicit logging: Logging,
-                                      ec: ExecutionContext,
-                                      actorSystem: ActorSystem,
-                                      materializer: ActorMaterializer,
-                                      tid: TransactionId) {
+class KafkaLauncher(
+  docker: StandaloneDockerClient,
+  kafkaPort: Int,
+  kafkaDockerPort: Int,
+  zkPort: Int,
+  workDir: File,
+  kafkaUi: Boolean)(implicit logging: Logging, ec: ExecutionContext, actorSystem: ActorSystem, tid: TransactionId) {
 
   def run(): Future[Seq[ServiceContainer]] = {
     for {
@@ -113,12 +109,12 @@ class KafkaLauncher(docker: StandaloneDockerClient,
 }
 
 object KafkaAwareLeanBalancer extends LoadBalancerProvider {
-  override def requiredProperties: Map[String, String] = LeanBalancer.requiredProperties ++ kafkaHosts
+  override def requiredProperties: Map[String, String] = MuxBalancer.requiredProperties ++ kafkaHosts
 
   override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
     implicit actorSystem: ActorSystem,
-    logging: Logging,
-    materializer: ActorMaterializer): LoadBalancer = LeanBalancer.instance(whiskConfig, instance)
+    logging: Logging): LoadBalancer =
+    MuxBalancer.instance(whiskConfig, instance)
 }
 
 object KafkaLauncher {
